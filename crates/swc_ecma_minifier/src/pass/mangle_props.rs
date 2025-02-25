@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
 use once_cell::sync::Lazy;
-use swc_atoms::JsWord;
-use swc_common::collections::{AHashMap, AHashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use swc_atoms::Atom;
 use swc_ecma_ast::{
-    CallExpr, Callee, Expr, Ident, KeyValueProp, Lit, MemberExpr, MemberProp, Program, Prop,
+    CallExpr, Callee, Expr, IdentName, KeyValueProp, Lit, MemberExpr, MemberProp, Program, Prop,
     PropName, Str, SuperProp, SuperPropExpr,
 };
 use swc_ecma_visit::{noop_visit_mut_type, VisitMut, VisitMutWith};
@@ -15,14 +15,14 @@ use crate::{
     util::base54::Base54Chars,
 };
 
-pub static JS_ENVIRONMENT_PROPS: Lazy<AHashSet<JsWord>> = Lazy::new(|| {
-    let domprops: Vec<JsWord> = serde_json::from_str(include_str!("../lists/domprops.json"))
+pub static JS_ENVIRONMENT_PROPS: Lazy<FxHashSet<Atom>> = Lazy::new(|| {
+    let domprops: Vec<Atom> = serde_json::from_str(include_str!("../lists/domprops.json"))
         .expect("failed to parse domprops.json for property mangler");
 
-    let jsprops: Vec<JsWord> = serde_json::from_str(include_str!("../lists/jsprops.json"))
+    let jsprops: Vec<Atom> = serde_json::from_str(include_str!("../lists/jsprops.json"))
         .expect("Failed to parse jsprops.json for property mangler");
 
-    let mut word_set: AHashSet<JsWord> = HashSet::default();
+    let mut word_set: FxHashSet<Atom> = HashSet::default();
 
     for name in domprops.iter().chain(jsprops.iter()) {
         word_set.insert(name.clone());
@@ -35,18 +35,18 @@ struct ManglePropertiesState {
     chars: Base54Chars,
     options: ManglePropertiesOptions,
 
-    names_to_mangle: AHashSet<JsWord>,
-    unmangleable: AHashSet<JsWord>,
+    names_to_mangle: FxHashSet<Atom>,
+    unmangleable: FxHashSet<Atom>,
 
     // Cache of already mangled names
-    cache: AHashMap<JsWord, JsWord>,
+    cache: FxHashMap<Atom, Atom>,
 
     // Numbers to pass to base54()
     n: usize,
 }
 
 impl ManglePropertiesState {
-    fn add(&mut self, name: &JsWord) {
+    fn add(&mut self, name: &Atom) {
         if self.can_mangle(name) {
             self.names_to_mangle.insert(name.clone());
         }
@@ -56,11 +56,11 @@ impl ManglePropertiesState {
         }
     }
 
-    fn can_mangle(&self, name: &JsWord) -> bool {
+    fn can_mangle(&self, name: &Atom) -> bool {
         !(self.unmangleable.contains(name) || self.is_reserved(name))
     }
 
-    fn matches_regex_option(&self, name: &JsWord) -> bool {
+    fn matches_regex_option(&self, name: &Atom) -> bool {
         if let Some(regex) = &self.options.regex {
             regex.is_match(name)
         } else {
@@ -68,7 +68,7 @@ impl ManglePropertiesState {
         }
     }
 
-    fn should_mangle(&self, name: &JsWord) -> bool {
+    fn should_mangle(&self, name: &Atom) -> bool {
         if !self.matches_regex_option(name) || self.is_reserved(name) {
             false
         } else {
@@ -76,11 +76,11 @@ impl ManglePropertiesState {
         }
     }
 
-    fn is_reserved(&self, name: &JsWord) -> bool {
+    fn is_reserved(&self, name: &Atom) -> bool {
         JS_ENVIRONMENT_PROPS.contains(name) || self.options.reserved.contains(name)
     }
 
-    fn gen_name(&mut self, name: &JsWord) -> Option<JsWord> {
+    fn gen_name(&mut self, name: &Atom) -> Option<Atom> {
         if self.should_mangle(name) {
             if let Some(cached) = self.cache.get(name) {
                 Some(cached.clone())
@@ -188,7 +188,7 @@ fn is_object_property_call(call: &CallExpr) -> bool {
         match &**callee {
             Expr::Member(MemberExpr {
                 obj,
-                prop: MemberProp::Ident(Ident { sym, .. }),
+                prop: MemberProp::Ident(IdentName { sym, .. }),
                 ..
             }) if *sym == *"defineProperty" => {
                 if obj.is_ident_ref_to("Object") {
@@ -223,7 +223,7 @@ struct Mangler<'a> {
 }
 
 impl Mangler<'_> {
-    fn mangle_ident(&mut self, ident: &mut Ident) {
+    fn mangle_ident(&mut self, ident: &mut IdentName) {
         if let Some(mangled) = self.state.gen_name(&ident.sym) {
             ident.sym = mangled;
         }
@@ -260,13 +260,13 @@ impl VisitMut for Mangler<'_> {
         prop.visit_mut_children_with(self);
 
         if let Prop::Shorthand(ident) = prop {
-            let mut new_ident = ident.clone();
+            let mut new_ident = IdentName::from(ident.clone());
 
             self.mangle_ident(&mut new_ident);
 
             *prop = Prop::KeyValue(KeyValueProp {
                 key: PropName::Ident(new_ident),
-                value: Box::new(Expr::Ident(ident.clone())),
+                value: ident.clone().into(),
             });
         }
     }

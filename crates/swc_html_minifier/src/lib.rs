@@ -3,21 +3,24 @@
 use std::{borrow::Cow, cmp::Ordering, mem::take};
 
 use once_cell::sync::Lazy;
+use rustc_hash::FxHashMap;
 use serde_json::Value;
-use swc_atoms::{js_word, JsWord};
+use swc_atoms::{atom, Atom};
 use swc_cached::regex::CachedRegex;
 use swc_common::{
-    collections::AHashMap, comments::SingleThreadedComments, sync::Lrc, EqIgnoreSpan, FileName,
-    FilePathMapping, Mark, SourceMap, DUMMY_SP,
+    comments::SingleThreadedComments, sync::Lrc, EqIgnoreSpan, FileName, FilePathMapping, Mark,
+    SourceMap, DUMMY_SP,
 };
 use swc_html_ast::*;
 use swc_html_parser::parser::ParserConfig;
 use swc_html_utils::{HTML_ELEMENTS_AND_ATTRIBUTES, SVG_ELEMENTS_AND_ATTRIBUTES};
 use swc_html_visit::{VisitMut, VisitMutWith};
 
+#[cfg(feature = "default-css-minifier")]
+use crate::option::CssOptions;
 use crate::option::{
-    CollapseWhitespaces, CssOptions, JsOptions, JsParserOptions, JsonOptions, MinifierType,
-    MinifyCssOption, MinifyJsOption, MinifyJsonOption, MinifyOptions, RemoveRedundantAttributes,
+    CollapseWhitespaces, JsOptions, JsParserOptions, JsonOptions, MinifierType, MinifyCssOption,
+    MinifyJsOption, MinifyJsonOption, MinifyOptions, RemoveRedundantAttributes,
 };
 
 pub mod option;
@@ -163,7 +166,7 @@ static SEMICOLON_SEPARATED_SVG_ATTRIBUTES: &[(&str, &str)] = &[
     ("set", "end"),
 ];
 
-enum CssMinificationMode {
+pub enum CssMinificationMode {
     Stylesheet,
     ListOfDeclarations,
     MediaQueryList,
@@ -224,13 +227,15 @@ pub static CONDITIONAL_COMMENT_START: Lazy<CachedRegex> =
 pub static CONDITIONAL_COMMENT_END: Lazy<CachedRegex> =
     Lazy::new(|| CachedRegex::new("\\[endif]").unwrap());
 
-struct Minifier<'a> {
-    options: &'a MinifyOptions,
+struct Minifier<'a, C: MinifyCss> {
+    options: &'a MinifyOptions<C::Options>,
 
     current_element: Option<Element>,
     latest_element: Option<Child>,
     descendant_of_pre: bool,
-    attribute_name_counter: Option<AHashMap<JsWord, usize>>,
+    attribute_name_counter: Option<FxHashMap<Atom, usize>>,
+
+    css_minifier: &'a C,
 }
 
 fn get_white_space(namespace: Namespace, tag_name: &str) -> WhiteSpace {
@@ -243,7 +248,7 @@ fn get_white_space(namespace: Namespace, tag_name: &str) -> WhiteSpace {
     }
 }
 
-impl Minifier<'_> {
+impl<C: MinifyCss> Minifier<'_, C> {
     fn is_event_handler_attribute(&self, attribute: &Attribute) -> bool {
         matches!(
             &*attribute.name,
@@ -354,7 +359,7 @@ impl Minifier<'_> {
             return false;
         }
 
-        if let Some(global_pseudo_element) = HTML_ELEMENTS_AND_ATTRIBUTES.get(&js_word!("*")) {
+        if let Some(global_pseudo_element) = HTML_ELEMENTS_AND_ATTRIBUTES.get(&atom!("*")) {
             if let Some(element) = global_pseudo_element.other.get(&attribute.name) {
                 if element.boolean.is_some() && element.boolean.unwrap() {
                     return true;
@@ -565,7 +570,7 @@ impl Minifier<'_> {
         }
     }
 
-    fn is_type_text_css(&self, value: &JsWord) -> bool {
+    fn is_type_text_css(&self, value: &Atom) -> bool {
         let value = value.trim().to_ascii_lowercase();
 
         matches!(&*value, "text/css")
@@ -646,7 +651,7 @@ impl Minifier<'_> {
                     with_namespace.push(':');
                     with_namespace.push_str(&attribute.name);
 
-                    attributes.other.get(&JsWord::from(with_namespace))
+                    attributes.other.get(&Atom::from(with_namespace))
                 } else {
                     attributes.other.get(&attribute.name)
                 };
@@ -730,7 +735,7 @@ impl Minifier<'_> {
         false
     }
 
-    fn is_preserved_comment(&self, data: &JsWord) -> bool {
+    fn is_preserved_comment(&self, data: &Atom) -> bool {
         if let Some(preserve_comments) = &self.options.preserve_comments {
             return preserve_comments.iter().any(|regex| regex.is_match(data));
         }
@@ -738,7 +743,7 @@ impl Minifier<'_> {
         false
     }
 
-    fn is_conditional_comment(&self, data: &JsWord) -> bool {
+    fn is_conditional_comment(&self, data: &Atom) -> bool {
         if CONDITIONAL_COMMENT_START.is_match(data) || CONDITIONAL_COMMENT_END.is_match(data) {
             return true;
         }
@@ -1134,7 +1139,7 @@ impl Minifier<'_> {
         Cow::Owned(collapsed)
     }
 
-    fn is_additional_minifier_attribute(&self, name: &JsWord) -> Option<MinifierType> {
+    fn is_additional_minifier_attribute(&self, name: &Atom) -> Option<MinifierType> {
         if let Some(minify_additional_attributes) = &self.options.minify_additional_attributes {
             for item in minify_additional_attributes {
                 if item.0.is_match(name) {
@@ -1355,7 +1360,7 @@ impl Minifier<'_> {
         }
 
         if data.is_empty() {
-            return Some(vec![]);
+            return Some(Vec::new());
         }
 
         Some(vec![Child::Text(Text {
@@ -1367,7 +1372,7 @@ impl Minifier<'_> {
 
     fn minify_children(&mut self, children: &mut Vec<Child>) -> Vec<Child> {
         if children.is_empty() {
-            return vec![];
+            return Vec::new();
         }
 
         let parent = match &self.current_element {
@@ -1732,7 +1737,7 @@ impl Minifier<'_> {
         &self,
         attributes: &'a Vec<Attribute>,
         name: &str,
-    ) -> Option<&'a JsWord> {
+    ) -> Option<&'a Atom> {
         let mut type_attribute_value = None;
 
         for attribute in attributes {
@@ -1821,8 +1826,8 @@ impl Minifier<'_> {
         let cm = Lrc::new(SourceMap::new(FilePathMapping::empty()));
 
         // Left
-        let mut left_errors: Vec<_> = vec![];
-        let left_fm = cm.new_source_file(FileName::Anon, left);
+        let mut left_errors: Vec<_> = Vec::new();
+        let left_fm = cm.new_source_file(FileName::Anon.into(), left);
         let syntax = swc_ecma_parser::Syntax::default();
         // Use the latest target for merging
         let target = swc_ecma_ast::EsVersion::latest();
@@ -1865,8 +1870,8 @@ impl Minifier<'_> {
         );
 
         // Right
-        let mut right_errors: Vec<_> = vec![];
-        let right_fm = cm.new_source_file(FileName::Anon, right);
+        let mut right_errors: Vec<_> = Vec::new();
+        let right_fm = cm.new_source_file(FileName::Anon.into(), right);
 
         let mut right_program = if is_modules {
             match swc_ecma_parser::parse_file_as_module(
@@ -1931,12 +1936,10 @@ impl Minifier<'_> {
             );
         }
 
-        let left_program = swc_ecma_visit::FoldWith::fold_with(
-            left_program,
-            &mut swc_ecma_transforms_base::fixer::fixer(Some(&comments)),
-        );
+        let left_program =
+            left_program.apply(swc_ecma_transforms_base::fixer::fixer(Some(&comments)));
 
-        let mut buf = vec![];
+        let mut buf = Vec::new();
 
         {
             let wr = Box::new(swc_ecma_codegen::text_writer::JsWriter::new(
@@ -1966,10 +1969,10 @@ impl Minifier<'_> {
 
     // TODO source map url output for JS and CSS?
     fn minify_js(&self, data: String, is_module: bool, is_attribute: bool) -> Option<String> {
-        let mut errors: Vec<_> = vec![];
+        let mut errors: Vec<_> = Vec::new();
 
         let cm = Lrc::new(SourceMap::new(FilePathMapping::empty()));
-        let fm = cm.new_source_file(FileName::Anon, data);
+        let fm = cm.new_source_file(FileName::Anon.into(), data);
         let mut options = self.get_js_options();
 
         if let swc_ecma_parser::Syntax::Es(es_config) = &mut options.parser.syntax {
@@ -2032,10 +2035,9 @@ impl Minifier<'_> {
             &mut swc_ecma_transforms_base::resolver(unresolved_mark, top_level_mark, false),
         );
 
-        let program = swc_ecma_visit::FoldWith::fold_with(
-            program,
-            &mut swc_ecma_transforms_base::fixer::paren_remover(Some(&comments)),
-        );
+        let program = program.apply(swc_ecma_transforms_base::fixer::paren_remover(Some(
+            &comments,
+        )));
 
         let program = swc_ecma_minifier::optimize(
             program,
@@ -2051,15 +2053,13 @@ impl Minifier<'_> {
             &swc_ecma_minifier::option::ExtraOptions {
                 unresolved_mark,
                 top_level_mark,
+                mangle_name_cache: None,
             },
         );
 
-        let program = swc_ecma_visit::FoldWith::fold_with(
-            program,
-            &mut swc_ecma_transforms_base::fixer::fixer(Some(&comments)),
-        );
+        let program = program.apply(swc_ecma_transforms_base::fixer::fixer(Some(&comments)));
 
-        let mut buf = vec![];
+        let mut buf = Vec::new();
 
         {
             let mut wr = Box::new(swc_ecma_codegen::text_writer::JsWriter::new(
@@ -2108,7 +2108,7 @@ impl Minifier<'_> {
 
     fn minify_sizes(&self, value: &str) -> Option<String> {
         let values = value
-            .rsplitn(2, |c| matches!(c, '\t' | '\n' | '\x0C' | '\r' | ' '))
+            .rsplitn(2, ['\t', '\n', '\x0C', '\r', ' '])
             .collect::<Vec<&str>>();
 
         if values.len() != 2 {
@@ -2136,179 +2136,16 @@ impl Minifier<'_> {
         Some(minified)
     }
 
-    fn get_css_options(&self) -> CssOptions {
-        match &self.options.minify_css {
-            MinifyCssOption::Bool(_) => CssOptions {
-                parser: swc_css_parser::parser::ParserConfig::default(),
-                minifier: swc_css_minifier::options::MinifyOptions::default(),
-                codegen: swc_css_codegen::CodegenConfig::default(),
-            },
-            MinifyCssOption::Options(css_options) => *css_options.clone(),
-        }
-    }
-
     fn minify_css(&self, data: String, mode: CssMinificationMode) -> Option<String> {
-        let mut errors: Vec<_> = vec![];
-
-        let cm = Lrc::new(SourceMap::new(FilePathMapping::empty()));
-        let fm = cm.new_source_file(FileName::Anon, data);
-
-        let mut options = self.get_css_options();
-
-        let mut stylesheet = match mode {
-            CssMinificationMode::Stylesheet => {
-                match swc_css_parser::parse_file(&fm, None, options.parser, &mut errors) {
-                    Ok(stylesheet) => stylesheet,
-                    _ => return None,
-                }
-            }
-            CssMinificationMode::ListOfDeclarations => {
-                match swc_css_parser::parse_file::<Vec<swc_css_ast::DeclarationOrAtRule>>(
-                    &fm,
-                    None,
-                    options.parser,
-                    &mut errors,
-                ) {
-                    Ok(list_of_declarations) => {
-                        let declaration_list: Vec<swc_css_ast::ComponentValue> =
-                            list_of_declarations
-                                .into_iter()
-                                .map(|node| node.into())
-                                .collect();
-
-                        swc_css_ast::Stylesheet {
-                            span: Default::default(),
-                            rules: vec![swc_css_ast::Rule::QualifiedRule(
-                                swc_css_ast::QualifiedRule {
-                                    span: Default::default(),
-                                    prelude: swc_css_ast::QualifiedRulePrelude::SelectorList(
-                                        swc_css_ast::SelectorList {
-                                            span: Default::default(),
-                                            children: vec![],
-                                        },
-                                    ),
-                                    block: swc_css_ast::SimpleBlock {
-                                        span: Default::default(),
-                                        name: swc_css_ast::TokenAndSpan {
-                                            span: DUMMY_SP,
-                                            token: swc_css_ast::Token::LBrace,
-                                        },
-                                        value: declaration_list,
-                                    },
-                                }
-                                .into(),
-                            )],
-                        }
-                    }
-                    _ => return None,
-                }
-            }
-            CssMinificationMode::MediaQueryList => {
-                match swc_css_parser::parse_file::<swc_css_ast::MediaQueryList>(
-                    &fm,
-                    None,
-                    options.parser,
-                    &mut errors,
-                ) {
-                    Ok(media_query_list) => swc_css_ast::Stylesheet {
-                        span: Default::default(),
-                        rules: vec![swc_css_ast::Rule::AtRule(
-                            swc_css_ast::AtRule {
-                                span: Default::default(),
-                                name: swc_css_ast::AtRuleName::Ident(swc_css_ast::Ident {
-                                    span: Default::default(),
-                                    value: "media".into(),
-                                    raw: None,
-                                }),
-                                prelude: Some(
-                                    swc_css_ast::AtRulePrelude::MediaPrelude(media_query_list)
-                                        .into(),
-                                ),
-                                block: Some(swc_css_ast::SimpleBlock {
-                                    span: Default::default(),
-                                    name: swc_css_ast::TokenAndSpan {
-                                        span: DUMMY_SP,
-                                        token: swc_css_ast::Token::LBrace,
-                                    },
-                                    // TODO make the `compress_empty` option for CSS minifier and
-                                    // remove it
-                                    value: vec![swc_css_ast::ComponentValue::Str(Box::new(
-                                        swc_css_ast::Str {
-                                            span: Default::default(),
-                                            value: "placeholder".into(),
-                                            raw: None,
-                                        },
-                                    ))],
-                                }),
-                            }
-                            .into(),
-                        )],
-                    },
-                    _ => return None,
-                }
-            }
-        };
-
-        // Avoid compress potential invalid CSS
-        if !errors.is_empty() {
-            return None;
-        }
-
-        swc_css_minifier::minify(&mut stylesheet, options.minifier);
-
-        let mut minified = String::new();
-        let wr = swc_css_codegen::writer::basic::BasicCssWriter::new(
-            &mut minified,
-            None,
-            swc_css_codegen::writer::basic::BasicCssWriterConfig::default(),
-        );
-
-        options.codegen.minify = true;
-
-        let mut gen = swc_css_codegen::CodeGenerator::new(wr, options.codegen);
-
-        match mode {
-            CssMinificationMode::Stylesheet => {
-                swc_css_codegen::Emit::emit(&mut gen, &stylesheet).unwrap();
-            }
-            CssMinificationMode::ListOfDeclarations => {
-                let swc_css_ast::Stylesheet { rules, .. } = &stylesheet;
-
-                // Because CSS is grammar free, protect for fails
-                let Some(swc_css_ast::Rule::QualifiedRule(qualified_rule)) = rules.first() else {
-                    return None;
-                };
-
-                let swc_css_ast::QualifiedRule { block, .. } = &**qualified_rule;
-
-                swc_css_codegen::Emit::emit(&mut gen, &block).unwrap();
-
-                minified = minified[1..minified.len() - 1].to_string();
-            }
-            CssMinificationMode::MediaQueryList => {
-                let swc_css_ast::Stylesheet { rules, .. } = &stylesheet;
-
-                // Because CSS is grammar free, protect for fails
-                let Some(swc_css_ast::Rule::AtRule(at_rule)) = rules.first() else {
-                    return None;
-                };
-
-                let swc_css_ast::AtRule { prelude, .. } = &**at_rule;
-
-                swc_css_codegen::Emit::emit(&mut gen, &prelude).unwrap();
-
-                minified = minified.trim().to_string();
-            }
-        }
-
-        Some(minified)
+        self.css_minifier
+            .minify_css(&self.options.minify_css, data, mode)
     }
 
     fn minify_html(&self, data: String, mode: HtmlMinificationMode) -> Option<String> {
-        let mut errors: Vec<_> = vec![];
+        let mut errors: Vec<_> = Vec::new();
 
         let cm = Lrc::new(SourceMap::new(FilePathMapping::empty()));
-        let fm = cm.new_source_file(FileName::Anon, data);
+        let fm = cm.new_source_file(FileName::Anon.into(), data);
 
         // Emulate content inside conditional comments like content inside the
         // `template` element
@@ -2322,8 +2159,8 @@ impl Minifier<'_> {
                     span: Default::default(),
                     tag_name: "template".into(),
                     namespace: Namespace::HTML,
-                    attributes: vec![],
-                    children: vec![],
+                    attributes: Vec::new(),
+                    children: Vec::new(),
                     content: None,
                     is_self_closing: false,
                 });
@@ -2362,13 +2199,16 @@ impl Minifier<'_> {
 
         match document_or_document_fragment {
             HtmlRoot::Document(ref mut document) => {
-                minify_document(document, self.options);
+                minify_document_with_custom_css_minifier(document, self.options, self.css_minifier);
             }
-            HtmlRoot::DocumentFragment(ref mut document_fragment) => minify_document_fragment(
-                document_fragment,
-                context_element.as_ref().unwrap(),
-                self.options,
-            ),
+            HtmlRoot::DocumentFragment(ref mut document_fragment) => {
+                minify_document_fragment_with_custom_css_minifier(
+                    document_fragment,
+                    context_element.as_ref().unwrap(),
+                    self.options,
+                    self.css_minifier,
+                )
+            }
         }
 
         let mut minified = String::new();
@@ -2467,7 +2307,7 @@ impl Minifier<'_> {
                     && n.name == "contenteditable"
                     && n.value.as_deref() == Some("true") =>
                 {
-                    n.value = Some(js_word!(""));
+                    n.value = Some(atom!(""));
                 }
                 _ if self.options.normalize_attributes
                     && self.is_semicolon_separated_attribute(element, n) =>
@@ -2489,7 +2329,7 @@ impl Minifier<'_> {
                         &["content-security-policy"],
                     ) =>
                 {
-                    let mut new_values = vec![];
+                    let mut new_values = Vec::new();
 
                     for value in value.trim().split(';') {
                         new_values.push(
@@ -2647,7 +2487,7 @@ impl Minifier<'_> {
     }
 }
 
-impl VisitMut for Minifier<'_> {
+impl<C: MinifyCss> VisitMut for Minifier<'_, C> {
     fn visit_mut_document(&mut self, n: &mut Document) {
         n.visit_mut_children_with(self);
 
@@ -2700,7 +2540,7 @@ impl VisitMut for Minifier<'_> {
             tag_name: n.tag_name.clone(),
             namespace: n.namespace,
             attributes: n.attributes.clone(),
-            children: vec![],
+            children: Vec::new(),
             content: None,
             is_self_closing: n.is_self_closing,
         });
@@ -2725,7 +2565,7 @@ impl VisitMut for Minifier<'_> {
             self.descendant_of_pre = old_descendant_of_pre;
         }
 
-        let mut remove_list = vec![];
+        let mut remove_list = Vec::new();
 
         for (i, i1) in n.attributes.iter().enumerate() {
             if i1.value.is_some() {
@@ -2822,7 +2662,7 @@ impl VisitMut for Minifier<'_> {
                             .iter()
                             .any(|attribute| matches!(&*attribute.name, "src")) =>
                 {
-                    let type_attribute_value: Option<JsWord> = self
+                    let type_attribute_value: Option<Atom> = self
                         .get_attribute_value(&current_element.attributes, "type")
                         .map(|v| v.to_ascii_lowercase().trim().into());
 
@@ -2979,7 +2819,7 @@ impl VisitMut for Minifier<'_> {
 }
 
 struct AttributeNameCounter {
-    tree: AHashMap<JsWord, usize>,
+    tree: FxHashMap<Atom, usize>,
 }
 
 impl VisitMut for AttributeNameCounter {
@@ -2990,10 +2830,205 @@ impl VisitMut for AttributeNameCounter {
     }
 }
 
-fn create_minifier<'a>(
+pub trait MinifyCss {
+    type Options;
+    fn minify_css(
+        &self,
+        options: &MinifyCssOption<Self::Options>,
+        data: String,
+        mode: CssMinificationMode,
+    ) -> Option<String>;
+}
+
+#[cfg(feature = "default-css-minifier")]
+struct DefaultCssMinifier;
+
+#[cfg(feature = "default-css-minifier")]
+impl DefaultCssMinifier {
+    fn get_css_options(&self, options: &MinifyCssOption<CssOptions>) -> CssOptions {
+        match options {
+            MinifyCssOption::Bool(_) => CssOptions {
+                parser: swc_css_parser::parser::ParserConfig::default(),
+                minifier: swc_css_minifier::options::MinifyOptions::default(),
+                codegen: swc_css_codegen::CodegenConfig::default(),
+            },
+            MinifyCssOption::Options(css_options) => css_options.clone(),
+        }
+    }
+}
+
+#[cfg(feature = "default-css-minifier")]
+impl MinifyCss for DefaultCssMinifier {
+    type Options = CssOptions;
+
+    fn minify_css(
+        &self,
+        options: &MinifyCssOption<Self::Options>,
+        data: String,
+        mode: CssMinificationMode,
+    ) -> Option<String> {
+        let mut errors: Vec<_> = Vec::new();
+
+        let cm = Lrc::new(SourceMap::new(FilePathMapping::empty()));
+        let fm = cm.new_source_file(FileName::Anon.into(), data);
+
+        let mut options = self.get_css_options(options);
+
+        let mut stylesheet = match mode {
+            CssMinificationMode::Stylesheet => {
+                match swc_css_parser::parse_file(&fm, None, options.parser, &mut errors) {
+                    Ok(stylesheet) => stylesheet,
+                    _ => return None,
+                }
+            }
+            CssMinificationMode::ListOfDeclarations => {
+                match swc_css_parser::parse_file::<Vec<swc_css_ast::DeclarationOrAtRule>>(
+                    &fm,
+                    None,
+                    options.parser,
+                    &mut errors,
+                ) {
+                    Ok(list_of_declarations) => {
+                        let declaration_list: Vec<swc_css_ast::ComponentValue> =
+                            list_of_declarations
+                                .into_iter()
+                                .map(|node| node.into())
+                                .collect();
+
+                        swc_css_ast::Stylesheet {
+                            span: Default::default(),
+                            rules: vec![swc_css_ast::Rule::QualifiedRule(
+                                swc_css_ast::QualifiedRule {
+                                    span: Default::default(),
+                                    prelude: swc_css_ast::QualifiedRulePrelude::SelectorList(
+                                        swc_css_ast::SelectorList {
+                                            span: Default::default(),
+                                            children: Vec::new(),
+                                        },
+                                    ),
+                                    block: swc_css_ast::SimpleBlock {
+                                        span: Default::default(),
+                                        name: swc_css_ast::TokenAndSpan {
+                                            span: DUMMY_SP,
+                                            token: swc_css_ast::Token::LBrace,
+                                        },
+                                        value: declaration_list,
+                                    },
+                                }
+                                .into(),
+                            )],
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+            CssMinificationMode::MediaQueryList => {
+                match swc_css_parser::parse_file::<swc_css_ast::MediaQueryList>(
+                    &fm,
+                    None,
+                    options.parser,
+                    &mut errors,
+                ) {
+                    Ok(media_query_list) => swc_css_ast::Stylesheet {
+                        span: Default::default(),
+                        rules: vec![swc_css_ast::Rule::AtRule(
+                            swc_css_ast::AtRule {
+                                span: Default::default(),
+                                name: swc_css_ast::AtRuleName::Ident(swc_css_ast::Ident {
+                                    span: Default::default(),
+                                    value: "media".into(),
+                                    raw: None,
+                                }),
+                                prelude: Some(
+                                    swc_css_ast::AtRulePrelude::MediaPrelude(media_query_list)
+                                        .into(),
+                                ),
+                                block: Some(swc_css_ast::SimpleBlock {
+                                    span: Default::default(),
+                                    name: swc_css_ast::TokenAndSpan {
+                                        span: DUMMY_SP,
+                                        token: swc_css_ast::Token::LBrace,
+                                    },
+                                    // TODO make the `compress_empty` option for CSS minifier and
+                                    // remove it
+                                    value: vec![swc_css_ast::ComponentValue::Str(Box::new(
+                                        swc_css_ast::Str {
+                                            span: Default::default(),
+                                            value: "placeholder".into(),
+                                            raw: None,
+                                        },
+                                    ))],
+                                }),
+                            }
+                            .into(),
+                        )],
+                    },
+                    _ => return None,
+                }
+            }
+        };
+
+        // Avoid compress potential invalid CSS
+        if !errors.is_empty() {
+            return None;
+        }
+
+        swc_css_minifier::minify(&mut stylesheet, options.minifier);
+
+        let mut minified = String::new();
+        let wr = swc_css_codegen::writer::basic::BasicCssWriter::new(
+            &mut minified,
+            None,
+            swc_css_codegen::writer::basic::BasicCssWriterConfig::default(),
+        );
+
+        options.codegen.minify = true;
+
+        let mut gen = swc_css_codegen::CodeGenerator::new(wr, options.codegen);
+
+        match mode {
+            CssMinificationMode::Stylesheet => {
+                swc_css_codegen::Emit::emit(&mut gen, &stylesheet).unwrap();
+            }
+            CssMinificationMode::ListOfDeclarations => {
+                let swc_css_ast::Stylesheet { rules, .. } = &stylesheet;
+
+                // Because CSS is grammar free, protect for fails
+                let Some(swc_css_ast::Rule::QualifiedRule(qualified_rule)) = rules.first() else {
+                    return None;
+                };
+
+                let swc_css_ast::QualifiedRule { block, .. } = &**qualified_rule;
+
+                swc_css_codegen::Emit::emit(&mut gen, &block).unwrap();
+
+                minified = minified[1..minified.len() - 1].to_string();
+            }
+            CssMinificationMode::MediaQueryList => {
+                let swc_css_ast::Stylesheet { rules, .. } = &stylesheet;
+
+                // Because CSS is grammar free, protect for fails
+                let Some(swc_css_ast::Rule::AtRule(at_rule)) = rules.first() else {
+                    return None;
+                };
+
+                let swc_css_ast::AtRule { prelude, .. } = &**at_rule;
+
+                swc_css_codegen::Emit::emit(&mut gen, &prelude).unwrap();
+
+                minified = minified.trim().to_string();
+            }
+        }
+
+        Some(minified)
+    }
+}
+
+fn create_minifier<'a, C: MinifyCss>(
     context_element: Option<&Element>,
-    options: &'a MinifyOptions,
-) -> Minifier<'a> {
+    options: &'a MinifyOptions<C::Options>,
+    css_minifier: &'a C,
+) -> Minifier<'a, C> {
     let mut current_element = None;
     let mut is_pre = false;
 
@@ -3010,11 +3045,17 @@ fn create_minifier<'a>(
         latest_element: None,
         descendant_of_pre: is_pre,
         attribute_name_counter: None,
+
+        css_minifier,
     }
 }
 
-pub fn minify_document(document: &mut Document, options: &MinifyOptions) {
-    let mut minifier = create_minifier(None, options);
+pub fn minify_document_with_custom_css_minifier<C: MinifyCss>(
+    document: &mut Document,
+    options: &MinifyOptions<C::Options>,
+    css_minifier: &C,
+) {
+    let mut minifier = create_minifier(None, options, css_minifier);
 
     if options.sort_attributes {
         let mut attribute_name_counter = AttributeNameCounter {
@@ -3029,12 +3070,13 @@ pub fn minify_document(document: &mut Document, options: &MinifyOptions) {
     document.visit_mut_with(&mut minifier);
 }
 
-pub fn minify_document_fragment(
+pub fn minify_document_fragment_with_custom_css_minifier<C: MinifyCss>(
     document_fragment: &mut DocumentFragment,
     context_element: &Element,
-    options: &MinifyOptions,
+    options: &MinifyOptions<C::Options>,
+    css_minifier: &C,
 ) {
-    let mut minifier = create_minifier(Some(context_element), options);
+    let mut minifier = create_minifier(Some(context_element), options, css_minifier);
 
     if options.sort_attributes {
         let mut attribute_name_counter = AttributeNameCounter {
@@ -3047,4 +3089,23 @@ pub fn minify_document_fragment(
     }
 
     document_fragment.visit_mut_with(&mut minifier);
+}
+
+#[cfg(feature = "default-css-minifier")]
+pub fn minify_document(document: &mut Document, options: &MinifyOptions<CssOptions>) {
+    minify_document_with_custom_css_minifier(document, options, &DefaultCssMinifier)
+}
+
+#[cfg(feature = "default-css-minifier")]
+pub fn minify_document_fragment(
+    document_fragment: &mut DocumentFragment,
+    context_element: &Element,
+    options: &MinifyOptions<CssOptions>,
+) {
+    minify_document_fragment_with_custom_css_minifier(
+        document_fragment,
+        context_element,
+        options,
+        &DefaultCssMinifier,
+    )
 }

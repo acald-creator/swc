@@ -1,7 +1,8 @@
 use std::{collections::VecDeque, mem::take};
 
-use swc_atoms::JsWord;
-use swc_common::{collections::AHashSet, input::Input, BytePos, Span};
+use rustc_hash::FxHashSet;
+use swc_atoms::Atom;
+use swc_common::{input::Input, BytePos, Span};
 use swc_xml_ast::{AttributeToken, Token, TokenAndSpan};
 
 use crate::{
@@ -156,7 +157,7 @@ where
             finished: false,
             state: State::Data,
             return_state: None,
-            errors: vec![],
+            errors: Vec::new(),
             additional_allowed_character: None,
             pending_tokens: VecDeque::new(),
             doctype_raw: None,
@@ -288,7 +289,7 @@ where
     #[cold]
     fn emit_error(&mut self, kind: ErrorKind) {
         self.errors.push(Error::new(
-            Span::new(self.cur_pos, self.input.cur_pos(), Default::default()),
+            Span::new(self.cur_pos, self.input.cur_pos()),
             kind,
         ));
     }
@@ -297,7 +298,7 @@ where
     fn emit_token(&mut self, token: Token) {
         let cur_pos = self.input.cur_pos();
 
-        let span = Span::new(self.last_token_pos, cur_pos, Default::default());
+        let span = Span::new(self.last_token_pos, cur_pos);
 
         self.last_token_pos = cur_pos;
         self.pending_tokens.push_back(TokenAndSpan { span, token });
@@ -436,7 +437,7 @@ where
             },
             Some('#') => {
                 let mut base = 10;
-                let mut characters = vec![];
+                let mut characters = Vec::new();
                 let mut has_semicolon = false;
 
                 match self.consume_next_char() {
@@ -651,10 +652,10 @@ where
         };
 
         let token = Token::Doctype {
-            name: current_doctype_token.name.map(JsWord::from),
-            public_id: current_doctype_token.public_id.map(JsWord::from),
-            system_id: current_doctype_token.system_id.map(JsWord::from),
-            raw: Some(JsWord::from(raw)),
+            name: current_doctype_token.name.map(Atom::from),
+            public_id: current_doctype_token.public_id.map(Atom::from),
+            system_id: current_doctype_token.system_id.map(Atom::from),
+            raw: Some(Atom::from(raw)),
         };
 
         self.emit_token(token);
@@ -786,8 +787,7 @@ where
             }) = self.current_tag_token
             {
                 if let Some(last) = attributes.last_mut() {
-                    last.span =
-                        Span::new(attribute_start_position, self.cur_pos, Default::default());
+                    last.span = Span::new(attribute_start_position, self.cur_pos);
                 }
             }
         }
@@ -805,13 +805,13 @@ where
                 current_tag_token.kind = kind;
             }
 
-            let mut already_seen: AHashSet<JsWord> = Default::default();
+            let mut already_seen: FxHashSet<Atom> = Default::default();
 
             let attributes = current_tag_token
                 .attributes
                 .drain(..)
                 .map(|attribute| {
-                    let name = JsWord::from(attribute.name);
+                    let name = Atom::from(attribute.name);
 
                     if already_seen.contains(&name) {
                         self.errors
@@ -823,9 +823,9 @@ where
                     AttributeToken {
                         span: attribute.span,
                         name,
-                        raw_name: attribute.raw_name.map(JsWord::from),
-                        value: attribute.value.map(JsWord::from),
-                        raw_value: attribute.raw_value.map(JsWord::from),
+                        raw_name: attribute.raw_name.map(Atom::from),
+                        value: attribute.value.map(Atom::from),
+                        raw_value: attribute.raw_value.map(Atom::from),
                     }
                 })
                 .collect();
@@ -1176,11 +1176,7 @@ where
                     }
                     _ => {
                         self.errors.push(Error::new(
-                            Span::new(
-                                self.cur_pos - BytePos(1),
-                                self.input.cur_pos() - BytePos(1),
-                                Default::default(),
-                            ),
+                            Span::new(self.cur_pos - BytePos(1), self.input.cur_pos() - BytePos(1)),
                             ErrorKind::MissingWhitespaceBeforeQuestionInProcessingInstruction,
                         ));
                         self.set_processing_instruction_token(None, Some('?'));

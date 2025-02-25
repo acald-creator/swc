@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use swc_atoms::JsWord;
+use swc_atoms::Atom;
 use swc_css_ast::Stylesheet;
 use swc_css_codegen::{
     writer::basic::{BasicCssWriter, BasicCssWriterConfig},
@@ -31,7 +31,7 @@ fn test_full(input: PathBuf, suffix: Option<&str>) {
     testing::run_test2(false, |cm, handler| {
         //
         let fm = cm.load_file(&input).unwrap();
-        let mut errors = vec![];
+        let mut errors = Vec::new();
         let mut ss: Stylesheet = parse_file(
             &fm,
             None,
@@ -80,7 +80,7 @@ fn test_without_env(input: PathBuf) {
 struct TestConfig {}
 
 impl swc_css_modules::TransformConfig for TestConfig {
-    fn new_name_for(&self, local: &JsWord) -> JsWord {
+    fn new_name_for(&self, local: &Atom) -> Atom {
         format!("__local__{}", local).into()
     }
 }

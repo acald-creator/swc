@@ -16,6 +16,7 @@ use serde::Deserialize;
 use swc_common::{
     comments::SingleThreadedComments,
     errors::{Handler, HANDLER},
+    input::SourceFileInput,
     sync::Lrc,
     Mark, SourceMap,
 };
@@ -28,16 +29,13 @@ use swc_ecma_minifier::{
     optimize,
     option::{terser::TerserCompressorOptions, CompressOptions, ExtraOptions, MinifyOptions},
 };
-use swc_ecma_parser::{
-    lexer::{input::SourceFileInput, Lexer},
-    EsConfig, Parser, Syntax,
-};
+use swc_ecma_parser::{lexer::Lexer, EsSyntax, Parser, Syntax};
 use swc_ecma_transforms_base::{
     fixer::{fixer, paren_remover},
     hygiene::hygiene,
     resolver,
 };
-use swc_ecma_visit::{FoldWith, VisitMutWith};
+use swc_ecma_visit::VisitMutWith;
 use testing::assert_eq;
 
 #[testing::fixture(
@@ -189,7 +187,7 @@ fn run(cm: Lrc<SourceMap>, handler: &Handler, input: &Path, config: &str) -> Opt
         let minification_start = Instant::now();
 
         let lexer = Lexer::new(
-            Syntax::Es(EsConfig {
+            Syntax::Es(EsSyntax {
                 jsx: true,
                 ..Default::default()
             }),
@@ -233,6 +231,7 @@ fn run(cm: Lrc<SourceMap>, handler: &Handler, input: &Path, config: &str) -> Opt
             &ExtraOptions {
                 unresolved_mark,
                 top_level_mark,
+                mangle_name_cache: None,
             },
         );
         let end = Instant::now();
@@ -244,7 +243,7 @@ fn run(cm: Lrc<SourceMap>, handler: &Handler, input: &Path, config: &str) -> Opt
 
         output.visit_mut_with(&mut hygiene());
 
-        let output = output.fold_with(&mut fixer(None));
+        let output = output.apply(&mut fixer(None));
 
         let end = Instant::now();
         tracing::info!(
@@ -306,7 +305,7 @@ fn print<N: swc_ecma_codegen::Node>(
     minify: bool,
     skip_semi: bool,
 ) -> String {
-    let mut buf = vec![];
+    let mut buf = Vec::new();
 
     {
         let mut wr: Box<dyn WriteJs> = Box::new(JsWriter::new(cm.clone(), "\n", &mut buf, None));

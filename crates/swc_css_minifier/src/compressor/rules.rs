@@ -1,9 +1,8 @@
 use std::mem::take;
 
-use swc_atoms::JsWord;
-use swc_common::{
-    collections::AHashMap, util::take::Take, EqIgnoreSpan, Span, Spanned, SyntaxContext,
-};
+use rustc_hash::FxHashMap;
+use swc_atoms::Atom;
+use swc_common::{util::take::Take, EqIgnoreSpan, Span, Spanned};
 use swc_css_ast::*;
 use swc_css_visit::{Visit, VisitMutWith, VisitWith};
 
@@ -16,9 +15,9 @@ enum ParentNode<'a> {
 
 #[derive(Eq, Hash, PartialEq)]
 enum Name {
-    CounterStyle(JsWord),
+    CounterStyle(Atom),
     // We need to keep prefixed keyframes, i.e. `@-webkit-keyframes`
-    Keyframes(JsWord, JsWord),
+    Keyframes(Atom, Atom),
 }
 
 struct CompatibilityChecker {
@@ -51,7 +50,7 @@ impl Visit for CompatibilityChecker {
 }
 
 impl Compressor {
-    fn get_at_rule_name(&self, at_rule: &AtRule) -> JsWord {
+    fn get_at_rule_name(&self, at_rule: &AtRule) -> Atom {
         match &at_rule.name {
             AtRuleName::Ident(Ident { value, .. }) => value.clone(),
             AtRuleName::DashedIdent(DashedIdent { value, .. }) => value.clone(),
@@ -80,7 +79,7 @@ impl Compressor {
         }
     }
 
-    fn collect_names(&self, at_rule: &AtRule, names: &mut AHashMap<Name, isize>) {
+    fn collect_names(&self, at_rule: &AtRule, names: &mut FxHashMap<Name, isize>) {
         let Some(prelude) = &at_rule.prelude else {
             return;
         };
@@ -115,7 +114,7 @@ impl Compressor {
     fn discard_overridden(
         &self,
         parent_node: ParentNode,
-        names: &mut AHashMap<Name, isize>,
+        names: &mut FxHashMap<Name, isize>,
         remove_rules_list: &mut Vec<usize>,
     ) {
         let mut discarder = |at_rule: &AtRule| {
@@ -202,7 +201,7 @@ impl Compressor {
         children.extend(right.children.take());
 
         SelectorList {
-            span: Span::new(left.span_lo(), right.span_hi(), SyntaxContext::empty()),
+            span: Span::new(left.span_lo(), right.span_hi()),
             children,
         }
     }
@@ -217,7 +216,7 @@ impl Compressor {
         children.extend(right.children.take());
 
         RelativeSelectorList {
-            span: Span::new(left.span_lo(), right.span_hi(), SyntaxContext::empty()),
+            span: Span::new(left.span_lo(), right.span_hi()),
             children,
         }
     }
@@ -228,7 +227,7 @@ impl Compressor {
         value.extend(right.value.take());
 
         SimpleBlock {
-            span: Span::new(left.span_lo(), right.span_hi(), SyntaxContext::empty()),
+            span: Span::new(left.span_lo(), right.span_hi()),
             name: left.name.clone(),
             value,
         }
@@ -282,7 +281,7 @@ impl Compressor {
                     let selector_list =
                         self.merge_selector_list(prev_selector_list, current_selector_list);
                     let mut qualified_rule = QualifiedRule {
-                        span: Span::new(left.span_lo(), right.span_hi(), SyntaxContext::empty()),
+                        span: Span::new(left.span_lo(), right.span_hi()),
                         prelude: QualifiedRulePrelude::SelectorList(selector_list),
                         block: left.block.take(),
                     };
@@ -300,7 +299,7 @@ impl Compressor {
                         current_relative_selector_list,
                     );
                     let mut qualified_rule = QualifiedRule {
-                        span: Span::new(left.span_lo(), right.span_hi(), SyntaxContext::empty()),
+                        span: Span::new(left.span_lo(), right.span_hi()),
                         prelude: QualifiedRulePrelude::RelativeSelectorList(relative_selector_list),
                         block: left.block.take(),
                     };
@@ -318,7 +317,7 @@ impl Compressor {
         if left.prelude.eq_ignore_span(&right.prelude) {
             let block = self.merge_simple_block(&mut left.block, &mut right.block);
             let mut qualified_rule = QualifiedRule {
-                span: Span::new(left.span_lo(), right.span_hi(), SyntaxContext::empty()),
+                span: Span::new(left.span_lo(), right.span_hi()),
                 prelude: left.prelude.take(),
                 block,
             };
@@ -357,11 +356,7 @@ impl Compressor {
                 if let Some(right_block) = &mut right.block {
                     let block = self.merge_simple_block(left_block, right_block);
                     let mut at_rule = AtRule {
-                        span: Span::new(
-                            left.span.span_lo(),
-                            right.span.span_lo(),
-                            SyntaxContext::empty(),
-                        ),
+                        span: Span::new(left.span.span_lo(), right.span.span_lo()),
                         name: left.name.clone(),
                         prelude: left.prelude.take(),
                         block: Some(block),
@@ -378,9 +373,9 @@ impl Compressor {
     }
 
     pub(super) fn compress_stylesheet(&mut self, stylesheet: &mut Stylesheet) {
-        let mut names: AHashMap<Name, isize> = Default::default();
+        let mut names: FxHashMap<Name, isize> = Default::default();
         let mut prev_rule_idx = None;
-        let mut remove_rules_list = vec![];
+        let mut remove_rules_list = Vec::new();
         let mut prev_index = 0;
 
         for index in 0..stylesheet.rules.len() {
@@ -515,9 +510,9 @@ impl Compressor {
     }
 
     pub(super) fn compress_simple_block(&mut self, simple_block: &mut SimpleBlock) {
-        let mut names: AHashMap<Name, isize> = Default::default();
+        let mut names: FxHashMap<Name, isize> = Default::default();
         let mut prev_rule_idx = None;
-        let mut remove_rules_list = vec![];
+        let mut remove_rules_list = Vec::new();
         let mut prev_index = 0;
 
         for index in 0..simple_block.value.len() {
@@ -669,6 +664,6 @@ impl Compressor {
 }
 
 #[inline]
-fn need_keep_by_name(name: &JsWord) -> bool {
+fn need_keep_by_name(name: &Atom) -> bool {
     *name == "color-profile"
 }

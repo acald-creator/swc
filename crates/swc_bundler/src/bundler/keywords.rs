@@ -1,4 +1,5 @@
-use swc_common::{collections::AHashMap, util::take::Take};
+use rustc_hash::FxHashMap;
+use swc_common::util::take::Take;
 use swc_ecma_ast::*;
 use swc_ecma_utils::private_ident;
 use swc_ecma_visit::{noop_visit_mut_type, VisitMut, VisitMutWith};
@@ -7,7 +8,7 @@ use crate::id::Id;
 
 #[derive(Default)]
 pub struct KeywordRenamer {
-    renamed: AHashMap<Id, Ident>,
+    renamed: FxHashMap<Id, Ident>,
 }
 
 impl KeywordRenamer {
@@ -31,11 +32,12 @@ impl KeywordRenamer {
 }
 
 impl VisitMut for KeywordRenamer {
-    noop_visit_mut_type!();
+    noop_visit_mut_type!(fail);
 
     fn visit_mut_binding_ident(&mut self, n: &mut BindingIdent) {
         if let Some(new) = self.renamed(&n.id) {
-            n.id = new;
+            n.ctxt = new.ctxt;
+            n.sym = new.sym;
         }
     }
 
@@ -90,17 +92,18 @@ impl VisitMut for KeywordRenamer {
                     Some(default) => {
                         *n = ObjectPatProp::KeyValue(KeyValuePatProp {
                             key: PropName::Ident(pat.key.take().into()),
-                            value: Box::new(Pat::Assign(AssignPat {
+                            value: AssignPat {
                                 span: pat.span,
-                                left: Box::new(Pat::Ident(renamed.into())),
+                                left: Box::new(renamed.into()),
                                 right: default.take(),
-                            })),
+                            }
+                            .into(),
                         });
                     }
                     None => {
                         *n = ObjectPatProp::KeyValue(KeyValuePatProp {
                             key: PropName::Ident(pat.key.take().into()),
-                            value: Box::new(Pat::Ident(renamed.into())),
+                            value: renamed.into(),
                         })
                     }
                 }
@@ -132,8 +135,8 @@ impl VisitMut for KeywordRenamer {
             Prop::Shorthand(i) => {
                 if let Some(renamed) = self.renamed(i) {
                     *n = Prop::KeyValue(KeyValueProp {
-                        key: PropName::Ident(i.clone()),
-                        value: Box::new(Expr::Ident(renamed)),
+                        key: PropName::Ident(i.clone().into()),
+                        value: renamed.into(),
                     });
                 }
             }

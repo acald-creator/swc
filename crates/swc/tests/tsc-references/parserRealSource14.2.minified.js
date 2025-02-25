@@ -11,7 +11,7 @@ import { _ as _class_call_check } from "@swc/helpers/_/_class_call_check";
     TypeScript.lastOf = lastOf, TypeScript.max = max, TypeScript.min = function(a, b) {
         return a <= b ? a : b;
     };
-    var GetAstPathOptions, AstPath = function() {
+    var GetAstPathOptions, AstPath = /*#__PURE__*/ function() {
         function AstPath() {
             _class_call_check(this, AstPath), this.asts = [], this.top = -1;
         }
@@ -167,7 +167,7 @@ import { _ as _class_call_check } from "@swc/helpers/_/_class_call_check";
         }, ctx = new AstPathContext();
         return TypeScript.getAstWalkerFactory().walk(script, function(cur, parent, walker) {
             if (isValidAstNode(cur)) {
-                var inclusive = hasFlag(options, 1) || cur.nodeType === TypeScript.NodeType.Name || pos === script.limChar, minChar = cur.minChar, limChar = cur.limChar + (inclusive ? 1 : 0);
+                var inclusive = hasFlag(options, 1) || cur.nodeType === TypeScript.NodeType.Name || pos === script.limChar, minChar = cur.minChar, limChar = cur.limChar + +!!inclusive;
                 if (pos >= minChar && pos < limChar) {
                     var previous = ctx.path.ast();
                     (null == previous || cur.minChar >= previous.minChar && cur.limChar <= previous.limChar) && ctx.path.push(cur);

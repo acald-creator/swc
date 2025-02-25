@@ -23,6 +23,8 @@ pub struct PrettyEmitter {
     reporter: GraphicalReportHandler,
 
     config: PrettyEmitterConfig,
+
+    diagnostics: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -42,6 +44,7 @@ impl PrettyEmitter {
             wr: WriterWrapper(wr),
             reporter,
             config,
+            diagnostics: vec![],
         }
     }
 }
@@ -75,7 +78,7 @@ impl SourceCode for MietteSourceCode<'_> {
         let lo = span.offset();
         let hi = lo + span.len();
 
-        let mut span = Span::new(BytePos(lo as _), BytePos(hi as _), Default::default());
+        let mut span = Span::new(BytePos(lo as _), BytePos(hi as _));
 
         span = self
             .0
@@ -131,12 +134,12 @@ impl SourceCode for MietteSourceCode<'_> {
         }
 
         let loc = self.0.lookup_char_pos(span.lo());
-        let line_count = loc.file.lines.len();
+        let line_count = loc.file.analyze().lines.len();
 
         let name = if self.1.skip_filename {
             None
         } else {
-            match loc.file.name {
+            match &*loc.file.name {
                 FileName::Real(ref path) => Some(path.to_string_lossy().into_owned()),
                 FileName::Custom(ref name) => Some(name.clone()),
                 FileName::Anon => None,
@@ -175,9 +178,19 @@ impl Emitter for PrettyEmitter {
             children,
         };
 
+        let mut format_result = String::new();
+
         self.reporter
-            .render_report(&mut self.wr, &diagnostic)
+            .render_report(&mut format_result, &diagnostic)
             .unwrap();
+
+        self.diagnostics.push(format_result.clone());
+
+        self.wr.write_str(&format_result).unwrap()
+    }
+
+    fn take_diagnostics(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.diagnostics)
     }
 }
 
@@ -267,7 +280,7 @@ impl fmt::Display for MietteDiagnostic<'_> {
 fn convert_span(span: Span) -> SourceSpan {
     let len = span.hi - span.lo;
     let start = SourceOffset::from(span.lo.0 as usize);
-    SourceSpan::new(start, SourceOffset::from(len.0 as usize))
+    SourceSpan::new(start, len.0 as usize)
 }
 
 struct MietteSubdiagnostic<'a> {

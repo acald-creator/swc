@@ -1,33 +1,51 @@
 use std::mem;
 
-use swc_common::{
-    collections::AHashSet, comments::Comments, sync::Lrc, util::take::Take, Mark, SourceMap, Span,
-    Spanned,
-};
+use rustc_hash::FxHashSet;
+use swc_common::{comments::Comments, sync::Lrc, util::take::Take, Mark, SourceMap, Span, Spanned};
 use swc_ecma_ast::*;
 use swc_ecma_transforms_react::{parse_expr_for_jsx, JsxDirectives};
-use swc_ecma_visit::{as_folder, Fold, VisitMut, VisitMutWith};
+use swc_ecma_visit::{visit_mut_pass, VisitMut, VisitMutWith};
 
 pub use crate::config::*;
 use crate::{strip_import_export::StripImportExport, strip_type::StripType, transform::transform};
 
-pub fn typescript(config: Config, top_level_mark: Mark) -> impl Fold + VisitMut {
-    as_folder(TypeScript {
+#[cfg(feature = "concurrent")]
+macro_rules! static_str {
+    ($s:expr) => {{
+        static VAL: once_cell::sync::Lazy<Lrc<String>> =
+            once_cell::sync::Lazy::new(|| Lrc::new($s.into()));
+        VAL.clone()
+    }};
+}
+
+#[cfg(not(feature = "concurrent"))]
+macro_rules! static_str {
+    ($s:expr) => {
+        Lrc::new($s.into())
+    };
+}
+
+pub fn typescript(config: Config, unresolved_mark: Mark, top_level_mark: Mark) -> impl Pass {
+    debug_assert_ne!(unresolved_mark, top_level_mark);
+
+    visit_mut_pass(TypeScript {
         config,
+        unresolved_mark,
         top_level_mark,
         id_usage: Default::default(),
     })
 }
 
-pub fn strip(top_level_mark: Mark) -> impl Fold + VisitMut {
-    typescript(Config::default(), top_level_mark)
+pub fn strip(unresolved_mark: Mark, top_level_mark: Mark) -> impl Pass {
+    typescript(Config::default(), unresolved_mark, top_level_mark)
 }
 
 pub(crate) struct TypeScript {
     pub config: Config,
+    pub unresolved_mark: Mark,
     pub top_level_mark: Mark,
 
-    id_usage: AHashSet<Id>,
+    id_usage: FxHashSet<Id>,
 }
 
 impl VisitMut for TypeScript {
@@ -36,18 +54,21 @@ impl VisitMut for TypeScript {
 
         if !self.config.verbatim_module_syntax {
             n.visit_mut_with(&mut StripImportExport {
-                id_usage: mem::take(&mut self.id_usage),
                 import_not_used_as_values: self.config.import_not_used_as_values,
+                usage_info: mem::take(&mut self.id_usage).into(),
+                ..Default::default()
             });
         }
 
         n.visit_mut_with(&mut StripType::default());
 
-        n.visit_mut_with(&mut transform(
+        n.mutate(transform(
+            self.unresolved_mark,
             self.top_level_mark,
             self.config.import_export_assign_config,
             self.config.ts_enum_is_mutable,
             self.config.verbatim_module_syntax,
+            self.config.native_class_properties,
         ));
 
         if let Some(span) = was_module {
@@ -80,22 +101,52 @@ impl TypeScript {
         n.body
             .iter()
             .rev()
-            .find(|m| m.is_module_decl())
+            .find(|m| m.is_es_module_decl())
             .map(Spanned::span)
     }
 
     fn restore_esm_ctx(n: &mut Module, span: Span) {
-        if n.body.iter().any(ModuleItem::is_module_decl) {
+        if n.body.iter().any(ModuleItem::is_es_module_decl) {
             return;
         }
 
-        n.body.push(ModuleItem::ModuleDecl(
+        n.body.push(
             NamedExport {
                 span,
                 ..NamedExport::dummy()
             }
             .into(),
-        ));
+        );
+    }
+}
+
+trait EsModuleDecl {
+    fn is_es_module_decl(&self) -> bool;
+}
+
+impl EsModuleDecl for ModuleDecl {
+    fn is_es_module_decl(&self) -> bool {
+        // Do not use `matches!`
+        // We should cover all cases explicitly.
+        match self {
+            ModuleDecl::Import(..)
+            | ModuleDecl::ExportDecl(..)
+            | ModuleDecl::ExportNamed(..)
+            | ModuleDecl::ExportDefaultDecl(..)
+            | ModuleDecl::ExportDefaultExpr(..)
+            | ModuleDecl::ExportAll(..) => true,
+
+            ModuleDecl::TsImportEquals(..)
+            | ModuleDecl::TsExportAssignment(..)
+            | ModuleDecl::TsNamespaceExport(..) => false,
+        }
+    }
+}
+
+impl EsModuleDecl for ModuleItem {
+    fn is_es_module_decl(&self) -> bool {
+        self.as_module_decl()
+            .map_or(false, ModuleDecl::is_es_module_decl)
     }
 }
 
@@ -104,18 +155,20 @@ pub fn tsx<C>(
     config: Config,
     tsx_config: TsxConfig,
     comments: C,
+    unresolved_mark: Mark,
     top_level_mark: Mark,
-) -> impl Fold + VisitMut
+) -> impl Pass
 where
     C: Comments,
 {
-    as_folder(TypeScriptReact {
+    visit_mut_pass(TypeScriptReact {
         config,
         tsx_config,
         id_usage: Default::default(),
         comments,
         cm,
         top_level_mark,
+        unresolved_mark,
     })
 }
 
@@ -137,10 +190,11 @@ where
 {
     config: Config,
     tsx_config: TsxConfig,
-    id_usage: AHashSet<Id>,
+    id_usage: FxHashSet<Id>,
     comments: C,
     cm: Lrc<SourceMap>,
     top_level_mark: Mark,
+    unresolved_mark: Mark,
 }
 
 impl<C> VisitMut for TypeScriptReact<C>
@@ -159,7 +213,7 @@ where
                 self.tsx_config
                     .pragma
                     .clone()
-                    .unwrap_or_else(|| "React.createElement".to_string()),
+                    .unwrap_or_else(|| static_str!("React.createElement")),
                 self.top_level_mark,
             );
 
@@ -169,7 +223,7 @@ where
                 self.tsx_config
                     .pragma_frag
                     .clone()
-                    .unwrap_or_else(|| "React.Fragment".to_string()),
+                    .unwrap_or_else(|| static_str!("React.Fragment")),
                 self.top_level_mark,
             );
 
@@ -219,6 +273,7 @@ where
 
         n.visit_mut_with(&mut TypeScript {
             config: mem::take(&mut self.config),
+            unresolved_mark: self.unresolved_mark,
             top_level_mark: self.top_level_mark,
             id_usage: mem::take(&mut self.id_usage),
         });

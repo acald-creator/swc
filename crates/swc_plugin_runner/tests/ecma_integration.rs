@@ -8,12 +8,12 @@ use std::{
 };
 
 use anyhow::{anyhow, Error};
+use rustc_hash::FxHashMap;
 use serde_json::json;
 #[cfg(feature = "__rkyv")]
 use swc_common::plugin::serialized::PluginSerializedBytes;
 use swc_common::{
-    collections::AHashMap, errors::HANDLER, plugin::metadata::TransformPluginMetadataContext,
-    sync::Lazy, FileName, Mark,
+    errors::HANDLER, plugin::metadata::TransformPluginMetadataContext, sync::Lazy, FileName, Mark,
 };
 use swc_ecma_ast::{CallExpr, Callee, EsVersion, Expr, Lit, MemberExpr, Program, Str};
 use swc_ecma_parser::{parse_file_as_program, Syntax};
@@ -107,21 +107,21 @@ fn internal() {
         testing::run_test(false, |cm, _handler| {
             eprint!("First run start");
 
-            let fm = cm.new_source_file(FileName::Anon, "console.log(foo)".into());
+            let fm = cm.new_source_file(FileName::Anon.into(), "console.log(foo)".into());
 
             let program = parse_file_as_program(
                 &fm,
                 Syntax::Es(Default::default()),
                 EsVersion::latest(),
                 None,
-                &mut vec![],
+                &mut Vec::new(),
             )
             .unwrap();
 
             let program =
                 PluginSerializedBytes::try_serialize(&VersionedSerializable::new(program))
                     .expect("Should serializable");
-            let experimental_metadata: AHashMap<String, String> = [
+            let experimental_metadata: FxHashMap<String, String> = [
                 (
                     "TestExperimental".to_string(),
                     "ExperimentalValue".to_string(),
@@ -175,21 +175,21 @@ fn internal() {
         // run single plugin with handler
         testing::run_test2(false, |cm, handler| {
             eprintln!("Second run start");
-            let fm = cm.new_source_file(FileName::Anon, "console.log(foo)".into());
+            let fm = cm.new_source_file(FileName::Anon.into(), "console.log(foo)".into());
 
             let program = parse_file_as_program(
                 &fm,
                 Syntax::Es(Default::default()),
                 EsVersion::latest(),
                 None,
-                &mut vec![],
+                &mut Vec::new(),
             )
             .unwrap();
 
             let program =
                 PluginSerializedBytes::try_serialize(&VersionedSerializable::new(program))
                     .expect("Should serializable");
-            let experimental_metadata: AHashMap<String, String> = [
+            let experimental_metadata: FxHashMap<String, String> = [
                 (
                     "TestExperimental".to_string(),
                     "ExperimentalValue".to_string(),

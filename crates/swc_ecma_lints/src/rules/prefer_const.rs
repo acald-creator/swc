@@ -1,12 +1,12 @@
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use swc_common::{collections::AHashMap, errors::HANDLER, Span};
+use swc_common::{errors::HANDLER, Span};
 use swc_ecma_ast::*;
 use swc_ecma_visit::{Visit, VisitWith};
 
 use crate::{
     config::{LintRuleReaction, RuleConfig},
     rule::{visitor_rule, Rule},
-    rules::utils::unwrap_seqs_and_parens,
 };
 
 // todo: implement option destructuring: all | any
@@ -55,7 +55,7 @@ struct VariableMeta {
 #[derive(Debug, Default)]
 struct PreferConst {
     expected_reaction: LintRuleReaction,
-    vars_meta: AHashMap<Id, VariableMeta>,
+    vars_meta: FxHashMap<Id, VariableMeta>,
     scope_vars_idx: usize,
     block_depth: usize,
     cycle_head_depth: usize,
@@ -110,8 +110,8 @@ impl PreferConst {
 
     fn collect_decl_pat(&mut self, initialized: bool, pat: &Pat) {
         match pat {
-            Pat::Ident(BindingIdent { id, .. }) => {
-                self.add_var_meta(id, initialized);
+            Pat::Ident(id) => {
+                self.add_var_meta(&Ident::from(id), initialized);
             }
             Pat::Assign(AssignPat { left, .. }) => {
                 self.collect_decl_pat(initialized, left.as_ref());
@@ -128,7 +128,7 @@ impl PreferConst {
                             self.collect_decl_pat(initialized, value.as_ref());
                         }
                         ObjectPatProp::Assign(AssignPatProp { key, .. }) => {
-                            self.add_var_meta(key, initialized);
+                            self.add_var_meta(&Ident::from(key), initialized);
                         }
                         ObjectPatProp::Rest(RestPat { arg, .. }) => {
                             self.collect_decl_pat(initialized, arg.as_ref());
@@ -166,8 +166,8 @@ impl PreferConst {
 
     fn consider_mutation(&mut self, pat: &Pat, destructuring_assign: bool) {
         match pat {
-            Pat::Ident(BindingIdent { id, .. }) => {
-                self.consider_mutation_for_ident(id, destructuring_assign);
+            Pat::Ident(id) => {
+                self.consider_mutation_for_ident(&Ident::from(id), destructuring_assign);
             }
             Pat::Array(ArrayPat { elems, .. }) => elems.iter().flatten().for_each(|elem| {
                 self.consider_mutation(elem, destructuring_assign);
@@ -178,7 +178,7 @@ impl PreferConst {
                         self.consider_mutation(value.as_ref(), true);
                     }
                     ObjectPatProp::Assign(AssignPatProp { key, .. }) => {
-                        self.consider_mutation_for_ident(key, true);
+                        self.consider_mutation_for_ident(&Ident::from(key), true);
                     }
                     _ => {}
                 });
@@ -237,7 +237,7 @@ impl Visit for PreferConst {
         if let op!("=") = assign_expr.op {
             match &assign_expr.left {
                 AssignTarget::Simple(SimpleAssignTarget::Ident(l)) => {
-                    self.consider_mutation_for_ident(l, false);
+                    self.consider_mutation_for_ident(&Ident::from(l), false);
                 }
 
                 AssignTarget::Pat(pat) => match pat {
@@ -252,7 +252,7 @@ impl Visit for PreferConst {
                                 self.consider_mutation(value.as_ref(), true);
                             }
                             ObjectPatProp::Assign(AssignPatProp { key, .. }) => {
-                                self.consider_mutation_for_ident(key, true);
+                                self.consider_mutation_for_ident(&Ident::from(key), true);
                             }
                             _ => {}
                         });
@@ -293,7 +293,7 @@ impl Visit for PreferConst {
     }
 
     fn visit_update_expr(&mut self, update_expr: &UpdateExpr) {
-        if let Expr::Ident(ident) = unwrap_seqs_and_parens(update_expr.arg.as_ref()) {
+        if let Expr::Ident(ident) = update_expr.arg.unwrap_seqs_and_parens() {
             self.consider_mutation_for_ident(ident, false);
         }
 

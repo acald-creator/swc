@@ -1,4 +1,4 @@
-use swc_atoms::JsWord;
+use swc_atoms::Atom;
 use swc_common::{BytePos, Span};
 use swc_css_ast::*;
 
@@ -13,7 +13,7 @@ where
     I: ParserInput,
 {
     pub(super) fn parse_generic_values(&mut self) -> PResult<Vec<ComponentValue>> {
-        let mut values = vec![];
+        let mut values = Vec::new();
 
         loop {
             self.input.skip_ws();
@@ -119,8 +119,8 @@ where
 
     /// Parse value as <any-value>.
     pub(super) fn parse_any_value(&mut self) -> PResult<Vec<TokenAndSpan>> {
-        let mut tokens = vec![];
-        let mut balance_stack: Vec<Option<char>> = vec![];
+        let mut tokens = Vec::new();
+        let mut balance_stack: Vec<Option<char>> = Vec::new();
 
         // The <any-value> production matches any sequence of one or more tokens,
         // so long as the sequence ...
@@ -180,7 +180,7 @@ where
         Ok(tokens)
     }
 
-    // TODO use `JsWord`
+    // TODO use `Atom`
     pub fn parse_function_values(
         &mut self,
         function_name: &FunctionName,
@@ -192,7 +192,7 @@ where
             }
         };
 
-        let mut values = vec![];
+        let mut values = Vec::new();
 
         let lower_fname = function_name.to_ascii_lowercase();
 
@@ -2020,12 +2020,12 @@ where
                 Ok(Length {
                     span,
                     value: Number {
-                        span: Span::new(span.lo, span.hi - BytePos(unit_len), Default::default()),
+                        span: Span::new(span.lo, span.hi - BytePos(unit_len)),
                         value,
                         raw: Some(raw_value),
                     },
                     unit: Ident {
-                        span: Span::new(span.hi - BytePos(unit_len), span.hi, Default::default()),
+                        span: Span::new(span.hi - BytePos(unit_len), span.hi),
                         value: unit,
                         raw: Some(raw_unit),
                     },
@@ -2071,12 +2071,12 @@ where
                 Ok(Angle {
                     span,
                     value: Number {
-                        span: Span::new(span.lo, span.hi - BytePos(unit_len), Default::default()),
+                        span: Span::new(span.lo, span.hi - BytePos(unit_len)),
                         value,
                         raw: Some(raw_value),
                     },
                     unit: Ident {
-                        span: Span::new(span.hi - BytePos(unit_len), span.hi, Default::default()),
+                        span: Span::new(span.hi - BytePos(unit_len), span.hi),
                         value: unit,
                         raw: Some(raw_unit),
                     },
@@ -2119,12 +2119,12 @@ where
                 Ok(Time {
                     span,
                     value: Number {
-                        span: Span::new(span.lo, span.hi - BytePos(unit_len), Default::default()),
+                        span: Span::new(span.lo, span.hi - BytePos(unit_len)),
                         value,
                         raw: Some(raw_value),
                     },
                     unit: Ident {
-                        span: Span::new(span.hi - BytePos(unit_len), span.hi, Default::default()),
+                        span: Span::new(span.hi - BytePos(unit_len), span.hi),
                         value: unit,
                         raw: Some(raw_unit),
                     },
@@ -2167,12 +2167,12 @@ where
                 Ok(Frequency {
                     span,
                     value: Number {
-                        span: Span::new(span.lo, span.hi - BytePos(unit_len), Default::default()),
+                        span: Span::new(span.lo, span.hi - BytePos(unit_len)),
                         value,
                         raw: Some(raw_value),
                     },
                     unit: Ident {
-                        span: Span::new(span.hi - BytePos(unit_len), span.hi, Default::default()),
+                        span: Span::new(span.hi - BytePos(unit_len), span.hi),
                         value: unit,
                         raw: Some(raw_unit),
                     },
@@ -2218,12 +2218,12 @@ where
                 Ok(Resolution {
                     span,
                     value: Number {
-                        span: Span::new(span.lo, span.hi - BytePos(unit_len), Default::default()),
+                        span: Span::new(span.lo, span.hi - BytePos(unit_len)),
                         value,
                         raw: Some(raw_value),
                     },
                     unit: Ident {
-                        span: Span::new(span.hi - BytePos(unit_len), span.hi, Default::default()),
+                        span: Span::new(span.hi - BytePos(unit_len), span.hi),
                         value: unit,
                         raw: Some(raw_unit),
                     },
@@ -2266,12 +2266,12 @@ where
                 Ok(Flex {
                     span,
                     value: Number {
-                        span: Span::new(span.lo, span.hi - BytePos(unit_len), Default::default()),
+                        span: Span::new(span.lo, span.hi - BytePos(unit_len)),
                         value,
                         raw: Some(raw_value),
                     },
                     unit: Ident {
-                        span: Span::new(span.hi - BytePos(unit_len), span.hi, Default::default()),
+                        span: Span::new(span.hi - BytePos(unit_len), span.hi),
                         value: unit,
                         raw: Some(raw_unit),
                     },
@@ -2310,12 +2310,12 @@ where
                 Ok(UnknownDimension {
                     span,
                     value: Number {
-                        span: Span::new(span.lo, span.hi - BytePos(unit_len), Default::default()),
+                        span: Span::new(span.lo, span.hi - BytePos(unit_len)),
                         value,
                         raw: Some(raw_value),
                     },
                     unit: Ident {
-                        span: Span::new(span.hi - BytePos(unit_len), span.hi, Default::default()),
+                        span: Span::new(span.hi - BytePos(unit_len), span.hi),
                         value: self.input.atom(unit.to_lowercase()),
                         raw: Some(raw_unit),
                     },
@@ -2529,7 +2529,7 @@ where
         match bump!(self) {
             Token::Percentage { value, raw } => {
                 let value = Number {
-                    span: Span::new(span.lo, span.hi - BytePos(1), Default::default()),
+                    span: Span::new(span.lo, span.hi - BytePos(1)),
                     value,
                     raw: Some(raw),
                 };
@@ -2585,16 +2585,12 @@ where
             Token::Url { value, raw } => {
                 let name_length = raw.0.len() as u32;
                 let name = Ident {
-                    span: Span::new(span.lo, span.lo + BytePos(name_length), Default::default()),
+                    span: Span::new(span.lo, span.lo + BytePos(name_length)),
                     value: self.input.atom("url"),
                     raw: Some(raw.0),
                 };
                 let value = Some(Box::new(UrlValue::Raw(UrlValueRaw {
-                    span: Span::new(
-                        span.lo + BytePos(name_length + 1),
-                        span.hi - BytePos(1),
-                        Default::default(),
-                    ),
+                    span: Span::new(span.lo + BytePos(name_length + 1), span.hi - BytePos(1)),
                     value,
                     raw: Some(raw.1),
                 })));
@@ -2618,7 +2614,7 @@ where
                 }
 
                 let name = Ident {
-                    span: Span::new(span.lo, span.hi - BytePos(1), Default::default()),
+                    span: Span::new(span.lo, span.hi - BytePos(1)),
                     value: function_name,
                     raw: Some(raw_function_name),
                 };
@@ -2632,7 +2628,7 @@ where
 
                 self.input.skip_ws();
 
-                let mut modifiers = vec![];
+                let mut modifiers = Vec::new();
 
                 loop {
                     if is!(self, ")") {
@@ -3046,7 +3042,7 @@ where
 {
     fn parse(&mut self) -> PResult<CalcSum> {
         let start = self.input.cur_span().lo;
-        let mut expressions = vec![];
+        let mut expressions = Vec::new();
         let calc_product = CalcProductOrOperator::Product(self.parse()?);
         let mut end = match calc_product {
             CalcProductOrOperator::Product(ref calc_product) => calc_product.span.hi,
@@ -3090,7 +3086,7 @@ where
         }
 
         Ok(CalcSum {
-            span: Span::new(start, end, Default::default()),
+            span: Span::new(start, end),
             expressions,
         })
     }
@@ -3102,7 +3098,7 @@ where
 {
     fn parse(&mut self) -> PResult<CalcProduct> {
         let start = self.input.cur_span().lo;
-        let mut expressions = vec![];
+        let mut expressions = Vec::new();
         let calc_value = CalcValueOrOperator::Value(self.parse()?);
         let mut end = match calc_value {
             CalcValueOrOperator::Value(ref calc_value) => match calc_value {
@@ -3176,7 +3172,7 @@ where
         }
 
         Ok(CalcProduct {
-            span: Span::new(start, end, Default::default()),
+            span: Span::new(start, end),
             expressions,
         })
     }
@@ -3331,7 +3327,7 @@ where
     }
 }
 
-pub(crate) fn is_math_function(name: &JsWord) -> bool {
+pub(crate) fn is_math_function(name: &Atom) -> bool {
     matches_eq_ignore_ascii_case!(
         name,
         "calc",
@@ -3360,7 +3356,7 @@ pub(crate) fn is_math_function(name: &JsWord) -> bool {
     )
 }
 
-fn is_absolute_color_base_function(name: &JsWord) -> bool {
+fn is_absolute_color_base_function(name: &Atom) -> bool {
     matches_eq_ignore_ascii_case!(
         name,
         "rgb",
@@ -3378,7 +3374,7 @@ fn is_absolute_color_base_function(name: &JsWord) -> bool {
     )
 }
 
-fn is_system_color(name: &JsWord) -> bool {
+fn is_system_color(name: &Atom) -> bool {
     matches_eq_ignore_ascii_case!(
         name,
         "canvas",
@@ -3468,7 +3464,7 @@ fn is_system_color(name: &JsWord) -> bool {
     )
 }
 
-fn is_named_color(name: &JsWord) -> bool {
+fn is_named_color(name: &Atom) -> bool {
     matches_eq_ignore_ascii_case!(
         name,
         "aliceblue",
@@ -3622,7 +3618,7 @@ fn is_named_color(name: &JsWord) -> bool {
     )
 }
 
-fn is_length_unit(unit: &JsWord) -> bool {
+fn is_length_unit(unit: &Atom) -> bool {
     matches_eq_ignore_ascii_case!(
         unit, "em", "rem", "ex", "rex", "cap", "rcap", "ch", "rch", "ic", "ric", "lh", "rlh",
         //  Viewport-percentage Lengths
@@ -3633,26 +3629,26 @@ fn is_length_unit(unit: &JsWord) -> bool {
     )
 }
 
-fn is_container_lengths_unit(unit: &JsWord) -> bool {
+fn is_container_lengths_unit(unit: &Atom) -> bool {
     matches_eq_ignore_ascii_case!(unit, "cqw", "cqh", "cqi", "cqb", "cqmin", "cqmax")
 }
 
-fn is_angle_unit(unit: &JsWord) -> bool {
+fn is_angle_unit(unit: &Atom) -> bool {
     matches_eq_ignore_ascii_case!(unit, "deg", "grad", "rad", "turn")
 }
 
-fn is_time_unit(unit: &JsWord) -> bool {
+fn is_time_unit(unit: &Atom) -> bool {
     matches_eq_ignore_ascii_case!(unit, "s", "ms")
 }
 
-fn is_frequency_unit(unit: &JsWord) -> bool {
+fn is_frequency_unit(unit: &Atom) -> bool {
     matches_eq_ignore_ascii_case!(unit, "hz", "khz")
 }
 
-fn is_resolution_unit(unit: &JsWord) -> bool {
+fn is_resolution_unit(unit: &Atom) -> bool {
     matches_eq_ignore_ascii_case!(unit, "dpi", "dpcm", "dppx", "x")
 }
 
-fn is_flex_unit(unit: &JsWord) -> bool {
+fn is_flex_unit(unit: &Atom) -> bool {
     matches_eq_ignore_ascii_case!(unit, "fr")
 }

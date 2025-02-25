@@ -2,14 +2,14 @@
 #![allow(dead_code)]
 #![recursion_limit = "256"]
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use preset_env_base::query::targets_to_versions;
 pub use preset_env_base::{query::Targets, version::Version, BrowserData, Versions};
-use regenerator::RegeneratorVisitor;
+use rustc_hash::FxHashSet;
 use serde::Deserialize;
-use swc_atoms::{js_word, JsWord};
-use swc_common::{chain, collections::AHashSet, comments::Comments, FromVariant, Mark, DUMMY_SP};
+use swc_atoms::{atom, Atom};
+use swc_common::{comments::Comments, pass::Optional, FromVariant, Mark, SyntaxContext, DUMMY_SP};
 use swc_ecma_ast::*;
 use swc_ecma_transforms::{
     compat::{
@@ -20,11 +20,10 @@ use swc_ecma_transforms::{
         regexp::{self, regexp},
     },
     feature::FeatureFlag,
-    pass::{noop, Optional},
     Assumptions,
 };
 use swc_ecma_utils::{prepend_stmts, ExprFactory};
-use swc_ecma_visit::{as_folder, Fold, VisitMut, VisitMutWith, VisitWith};
+use swc_ecma_visit::{visit_mut_pass, VisitMut, VisitMutWith, VisitWith};
 
 pub use self::transform_data::Feature;
 
@@ -41,18 +40,18 @@ pub fn preset_env<C>(
     c: Config,
     assumptions: Assumptions,
     feature_set: &mut FeatureFlag,
-) -> impl Fold
+) -> impl Pass
 where
     C: Comments + Clone,
 {
     let loose = c.loose;
-    let targets: Versions = targets_to_versions(c.targets).expect("failed to parse targets");
+    let targets = targets_to_versions(c.targets).expect("failed to parse targets");
     let is_any_target = targets.is_any_target();
 
     let (include, included_modules) = FeatureOrModule::split(c.include);
     let (exclude, excluded_modules) = FeatureOrModule::split(c.exclude);
 
-    let pass = noop();
+    let pass = noop_pass();
 
     macro_rules! should_enable {
         ($feature:ident, $default:expr) => {{
@@ -61,7 +60,7 @@ where
                 && (c.force_all_transforms
                     || (is_any_target
                         || include.contains(&f)
-                        || f.should_enable(targets, c.bugfixes, $default)))
+                        || f.should_enable(&targets, c.bugfixes, $default)))
         }};
     }
 
@@ -81,16 +80,16 @@ where
             if c.debug {
                 println!("{}: {:?}", f.as_str(), enable);
             }
-            chain!($prev, Optional::new($pass, enable))
+            ($prev, Optional::new($pass, enable))
         }};
     }
 
-    let pass = chain!(
+    let pass = (
         pass,
         Optional::new(
             class_fields_use_set(assumptions.pure_getters),
-            assumptions.set_public_class_fields
-        )
+            assumptions.set_public_class_fields,
+        ),
     );
 
     let pass = {
@@ -107,7 +106,7 @@ where
             || enable_unicode_property_regex
             || enable_unicode_regex;
 
-        chain!(
+        (
             pass,
             Optional::new(
                 regexp(regexp::Config {
@@ -122,8 +121,8 @@ where
                     unicode_regex: enable_unicode_regex,
                     unicode_sets_regex: enable_unicode_sets_regex,
                 }),
-                enable
-            )
+                enable,
+            ),
         )
     };
 
@@ -132,23 +131,17 @@ where
     // ES2022
     // static block needs to be placed before class property
     // because it transforms into private static property
-    let static_blocks_mark = Mark::new();
-    let pass = add!(
-        pass,
-        ClassStaticBlock,
-        es2022::static_blocks(static_blocks_mark)
-    );
+
+    let pass = add!(pass, ClassStaticBlock, es2022::static_blocks());
     let pass = add!(
         pass,
         ClassProperties,
         es2022::class_properties(
-            comments.clone(),
             es2022::class_properties::Config {
                 private_as_properties: loose || assumptions.private_fields_as_properties,
                 set_public_fields: loose || assumptions.set_public_class_fields,
                 constant_super: loose || assumptions.constant_super,
                 no_document_all: loose || assumptions.no_document_all,
-                static_blocks_mark,
                 pure_getter: loose || assumptions.pure_getters,
             },
             unresolved_mark
@@ -209,7 +202,6 @@ where
                 ignore_function_name: loose || assumptions.ignore_function_name,
                 ignore_function_length: loose || assumptions.ignore_function_length,
             },
-            comments.clone(),
             unresolved_mark
         )
     );
@@ -231,15 +223,12 @@ where
     let pass = add!(
         pass,
         Classes,
-        es2015::classes(
-            comments.clone(),
-            es2015::classes::Config {
-                constant_super: loose || assumptions.constant_super,
-                no_class_calls: loose || assumptions.no_class_calls,
-                set_class_methods: loose || assumptions.set_class_methods,
-                super_is_callable_constructor: loose || assumptions.super_is_callable_constructor,
-            }
-        )
+        es2015::classes(es2015::classes::Config {
+            constant_super: loose || assumptions.constant_super,
+            no_class_calls: loose || assumptions.no_class_calls,
+            set_class_methods: loose || assumptions.set_class_methods,
+            super_is_callable_constructor: loose || assumptions.super_is_callable_constructor,
+        })
     );
     let pass = add!(
         pass,
@@ -342,58 +331,57 @@ where
         println!("Targets: {:?}", targets);
     }
 
-    chain!(
+    (
         pass,
-        as_folder(Polyfills {
+        visit_mut_pass(Polyfills {
             mode: c.mode,
             regenerator: should_enable!(Regenerator, true),
             corejs: c.core_js.unwrap_or(Version {
                 major: 3,
                 minor: 0,
-                patch: 0
+                patch: 0,
             }),
             shipped_proposals: c.shipped_proposals,
             targets,
             includes: included_modules,
             excludes: excluded_modules,
             unresolved_mark,
-        })
+        }),
     )
 }
 
 #[derive(Debug)]
 struct Polyfills {
     mode: Option<Mode>,
-    targets: Versions,
+    targets: Arc<Versions>,
     shipped_proposals: bool,
     corejs: Version,
     regenerator: bool,
-    includes: AHashSet<String>,
-    excludes: AHashSet<String>,
+    includes: FxHashSet<String>,
+    excludes: FxHashSet<String>,
     unresolved_mark: Mark,
 }
 impl Polyfills {
-    fn collect<T>(&mut self, m: &mut T) -> Vec<JsWord>
+    fn collect<T>(&mut self, m: &mut T) -> Vec<Atom>
     where
         T: VisitWith<corejs2::UsageVisitor>
             + VisitWith<corejs3::UsageVisitor>
             + VisitMutWith<corejs2::Entry>
-            + VisitMutWith<corejs3::Entry>
-            + VisitWith<RegeneratorVisitor>,
+            + VisitMutWith<corejs3::Entry>,
     {
         let required = match self.mode {
             None => Default::default(),
             Some(Mode::Usage) => {
                 let mut r = match self.corejs {
                     Version { major: 2, .. } => {
-                        let mut v = corejs2::UsageVisitor::new(self.targets);
+                        let mut v = corejs2::UsageVisitor::new(self.targets.clone());
                         m.visit_with(&mut v);
 
                         v.required
                     }
                     Version { major: 3, .. } => {
                         let mut v = corejs3::UsageVisitor::new(
-                            self.targets,
+                            self.targets.clone(),
                             self.shipped_proposals,
                             self.corejs,
                         );
@@ -412,13 +400,14 @@ impl Polyfills {
             }
             Some(Mode::Entry) => match self.corejs {
                 Version { major: 2, .. } => {
-                    let mut v = corejs2::Entry::new(self.targets, self.regenerator);
+                    let mut v = corejs2::Entry::new(self.targets.clone(), self.regenerator);
                     m.visit_mut_with(&mut v);
                     v.imports
                 }
 
                 Version { major: 3, .. } => {
-                    let mut v = corejs3::Entry::new(self.targets, self.corejs, !self.regenerator);
+                    let mut v =
+                        corejs3::Entry::new(self.targets.clone(), self.corejs, !self.regenerator);
                     m.visit_mut_with(&mut v);
                     v.imports
                 }
@@ -432,7 +421,7 @@ impl Polyfills {
                 !s.starts_with("esnext") || !required.contains(&s.replace("esnext", "es").as_str())
             })
             .filter(|s| !self.excludes.contains(&***s))
-            .map(|s| -> JsWord {
+            .map(|s| -> Atom {
                 if *s != "regenerator-runtime/runtime.js" {
                     format!("core-js/modules/{}.js", s).into()
                 } else {
@@ -459,9 +448,9 @@ impl VisitMut for Polyfills {
             prepend_stmts(
                 &mut m.body,
                 v.into_iter().map(|src| {
-                    ModuleItem::ModuleDecl(ModuleDecl::Import(ImportDecl {
+                    ImportDecl {
                         span,
-                        specifiers: vec![],
+                        specifiers: Vec::new(),
                         src: Str {
                             span: DUMMY_SP,
                             raw: None,
@@ -471,16 +460,17 @@ impl VisitMut for Polyfills {
                         type_only: false,
                         with: None,
                         phase: Default::default(),
-                    }))
+                    }
+                    .into()
                 }),
             );
         } else {
             prepend_stmts(
                 &mut m.body,
                 required.into_iter().map(|src| {
-                    ModuleItem::ModuleDecl(ModuleDecl::Import(ImportDecl {
+                    ImportDecl {
                         span,
-                        specifiers: vec![],
+                        specifiers: Vec::new(),
                         src: Str {
                             span: DUMMY_SP,
                             raw: None,
@@ -490,12 +480,13 @@ impl VisitMut for Polyfills {
                         type_only: false,
                         with: None,
                         phase: Default::default(),
-                    }))
+                    }
+                    .into()
                 }),
             );
         }
 
-        m.body.retain(|item| !matches!(item, ModuleItem::ModuleDecl(ModuleDecl::Import(ImportDecl { src, .. })) if src.span == DUMMY_SP && src.value == js_word!("")));
+        m.body.retain(|item| !matches!(item, ModuleItem::ModuleDecl(ModuleDecl::Import(ImportDecl { src, .. })) if src.span == DUMMY_SP && src.value == atom!("")));
     }
 
     fn visit_mut_script(&mut self, m: &mut Script) {
@@ -507,15 +498,15 @@ impl VisitMut for Polyfills {
             prepend_stmts(
                 &mut m.body,
                 v.into_iter().map(|src| {
-                    Stmt::Expr(ExprStmt {
+                    ExprStmt {
                         span: DUMMY_SP,
                         expr: CallExpr {
                             span,
-                            callee: Expr::Ident(Ident {
-                                span: DUMMY_SP.apply_mark(self.unresolved_mark),
+                            callee: Ident {
+                                ctxt: SyntaxContext::empty().apply_mark(self.unresolved_mark),
                                 sym: "require".into(),
-                                optional: false,
-                            })
+                                ..Default::default()
+                            }
                             .as_callee(),
                             args: vec![Str {
                                 span: DUMMY_SP,
@@ -524,24 +515,26 @@ impl VisitMut for Polyfills {
                             }
                             .as_arg()],
                             type_args: None,
+                            ..Default::default()
                         }
                         .into(),
-                    })
+                    }
+                    .into()
                 }),
             );
         } else {
             prepend_stmts(
                 &mut m.body,
                 required.into_iter().map(|src| {
-                    Stmt::Expr(ExprStmt {
+                    ExprStmt {
                         span: DUMMY_SP,
                         expr: CallExpr {
                             span,
-                            callee: Expr::Ident(Ident {
-                                span: DUMMY_SP.apply_mark(self.unresolved_mark),
+                            callee: Ident {
+                                ctxt: SyntaxContext::empty().apply_mark(self.unresolved_mark),
                                 sym: "require".into(),
-                                optional: false,
-                            })
+                                ..Default::default()
+                            }
                             .as_callee(),
                             args: vec![Str {
                                 span: DUMMY_SP,
@@ -549,10 +542,11 @@ impl VisitMut for Polyfills {
                                 raw: None,
                             }
                             .as_arg()],
-                            type_args: None,
+                            ..Default::default()
                         }
                         .into(),
-                    })
+                    }
+                    .into()
                 }),
             );
         }
@@ -587,7 +581,7 @@ pub struct Config {
     /// e.g.)
     ///  - `core-js/modules/foo`
     #[serde(default)]
-    pub skip: Vec<JsWord>,
+    pub skip: Vec<Atom>,
 
     #[serde(default)]
     pub include: Vec<FeatureOrModule>,
@@ -631,9 +625,9 @@ pub enum FeatureOrModule {
 }
 
 impl FeatureOrModule {
-    pub fn split(vec: Vec<FeatureOrModule>) -> (Vec<Feature>, AHashSet<String>) {
+    pub fn split(vec: Vec<FeatureOrModule>) -> (Vec<Feature>, FxHashSet<String>) {
         let mut features: Vec<_> = Default::default();
-        let mut modules: AHashSet<_> = Default::default();
+        let mut modules: FxHashSet<_> = Default::default();
 
         for v in vec {
             match v {

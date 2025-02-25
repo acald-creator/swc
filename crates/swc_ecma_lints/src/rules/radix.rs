@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use swc_atoms::JsWord;
+use swc_atoms::Atom;
 use swc_common::{
     errors::{DiagnosticBuilder, HANDLER},
     Span, SyntaxContext,
@@ -10,7 +10,7 @@ use swc_ecma_visit::{noop_visit_type, Visit, VisitWith};
 use crate::{
     config::{LintRuleReaction, RuleConfig},
     rule::{visitor_rule, Rule},
-    rules::utils::{extract_arg_val, unwrap_seqs_and_parens, ArgValue},
+    rules::utils::{extract_arg_val, ArgValue},
 };
 
 const OBJ_NAMES: &[&str] = &["Number", "globalThis"];
@@ -118,7 +118,7 @@ impl Radix {
         self.arrow_fns_depth > 0
     }
 
-    fn check(&self, call_expr: &CallExpr, obj: Option<JsWord>, prop: JsWord) {
+    fn check(&self, call_expr: &CallExpr, obj: Option<Atom>, prop: Atom) {
         if let Some(obj) = obj {
             let obj: &str = &obj;
 
@@ -131,7 +131,7 @@ impl Radix {
             return;
         }
 
-        if call_expr.args.first().is_none() {
+        if call_expr.args.is_empty() {
             self.emit_report(call_expr.span, MISSING_PARAMS_MESSAGE, None);
 
             return;
@@ -140,7 +140,7 @@ impl Radix {
         match call_expr.args.get(1) {
             Some(ExprOrSpread { expr, .. }) => {
                 let expr = if self.unwrap_parens_and_seqs {
-                    unwrap_seqs_and_parens(expr.as_ref())
+                    expr.unwrap_seqs_and_parens()
                 } else {
                     expr.as_ref()
                 };
@@ -178,16 +178,16 @@ impl Radix {
     }
 
     fn is_satisfying_indent(&self, ident: &Ident) -> bool {
-        if ident.span.ctxt != self.unresolved_ctxt {
+        if ident.ctxt != self.unresolved_ctxt {
             return false;
         }
 
         true
     }
 
-    fn extract_prop_value(&mut self, prop: &MemberProp) -> Option<JsWord> {
+    fn extract_prop_value(&mut self, prop: &MemberProp) -> Option<Atom> {
         match prop {
-            MemberProp::Ident(Ident { sym, .. }) => Some(sym.clone()),
+            MemberProp::Ident(IdentName { sym, .. }) => Some(sym.clone()),
             MemberProp::Computed(ComputedPropName { expr, .. }) => {
                 if let Expr::Lit(Lit::Str(Str { value, .. })) = expr.as_ref() {
                     return Some(value.clone());
@@ -202,7 +202,7 @@ impl Radix {
     fn extract_obj_and_prop_member_case(
         &mut self,
         member_expr: &MemberExpr,
-    ) -> (Option<JsWord>, Option<JsWord>) {
+    ) -> (Option<Atom>, Option<Atom>) {
         let MemberExpr { obj, prop, .. } = member_expr;
 
         match obj.as_ref() {
@@ -233,7 +233,7 @@ impl Radix {
         (None, None)
     }
 
-    fn extract_obj_and_prop(&mut self, callee_expr: &Expr) -> (Option<JsWord>, Option<JsWord>) {
+    fn extract_obj_and_prop(&mut self, callee_expr: &Expr) -> (Option<Atom>, Option<Atom>) {
         match callee_expr {
             Expr::Ident(ident) => {
                 if self.is_satisfying_indent(ident) {

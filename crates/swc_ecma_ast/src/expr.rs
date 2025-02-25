@@ -1,8 +1,12 @@
 #![allow(clippy::vec_box)]
+use std::{borrow::Cow, mem::transmute};
+
 use is_macro::Is;
 use string_enum::StringEnum;
 use swc_atoms::Atom;
-use swc_common::{ast_node, util::take::Take, BytePos, EqIgnoreSpan, Span, Spanned, DUMMY_SP};
+use swc_common::{
+    ast_node, util::take::Take, BytePos, EqIgnoreSpan, Span, Spanned, SyntaxContext, DUMMY_SP,
+};
 
 use crate::{
     class::Class,
@@ -18,13 +22,14 @@ use crate::{
         TsAsExpr, TsConstAssertion, TsInstantiation, TsNonNullExpr, TsSatisfiesExpr, TsTypeAnn,
         TsTypeAssertion, TsTypeParamDecl, TsTypeParamInstantiation,
     },
-    ArrayPat, BindingIdent, ComputedPropName, Id, ImportPhase, Invalid, KeyValueProp, ObjectPat,
-    PropName, Str,
+    ArrayPat, BindingIdent, ComputedPropName, Id, IdentName, ImportPhase, Invalid, KeyValueProp,
+    Number, ObjectPat, PropName, Str,
 };
 
 #[ast_node(no_clone)]
 #[derive(Eq, Hash, Is, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub enum Expr {
     #[tag("ThisExpression")]
     This(ThisExpr),
@@ -171,6 +176,22 @@ bridge_from!(Box<Expr>, Box<JSXElement>, JSXElement);
 // assert_eq_size!(Expr, [u8; 80]);
 
 impl Expr {
+    /// Creates `void 0`.
+    #[inline]
+    pub fn undefined(span: Span) -> Box<Expr> {
+        UnaryExpr {
+            span,
+            op: op!("void"),
+            arg: Lit::Num(Number {
+                span,
+                value: 0.0,
+                raw: None,
+            })
+            .into(),
+        }
+        .into()
+    }
+
     pub fn leftmost(&self) -> Option<&Ident> {
         match self {
             Expr::Ident(i) => Some(i),
@@ -180,10 +201,55 @@ impl Expr {
         }
     }
 
-    pub fn is_ident_ref_to(&self, ident: &str) -> bool {
+    pub fn is_ident_ref_to<S>(&self, ident: &S) -> bool
+    where
+        S: ?Sized,
+        Atom: PartialEq<S>,
+    {
         match self {
-            Expr::Ident(i) => i.sym == ident,
+            Expr::Ident(i) => i.sym == *ident,
             _ => false,
+        }
+    }
+
+    /// Unwraps an expression with a given function.
+    ///
+    /// If the provided function returns [Some], the function is called again
+    /// with the returned value. If the provided functions returns [None],
+    /// the last expression is returned.
+    pub fn unwrap_with<'a, F>(&'a self, mut op: F) -> &'a Expr
+    where
+        F: FnMut(&'a Expr) -> Option<&'a Expr>,
+    {
+        let mut cur = self;
+        loop {
+            match op(cur) {
+                Some(next) => cur = next,
+                None => return cur,
+            }
+        }
+    }
+
+    /// Unwraps an expression with a given function.
+    ///
+    /// If the provided function returns [Some], the function is called again
+    /// with the returned value. If the provided functions returns [None],
+    /// the last expression is returned.
+    pub fn unwrap_mut_with<'a, F>(&'a mut self, mut op: F) -> &'a mut Expr
+    where
+        F: FnMut(&'a mut Expr) -> Option<&'a mut Expr>,
+    {
+        let mut cur = self;
+        loop {
+            match unsafe {
+                // Safety: Polonius is not yet stable
+                op(transmute::<&mut _, &mut _>(cur))
+            } {
+                Some(next) => cur = next,
+                None => {
+                    return cur;
+                }
+            }
         }
     }
 
@@ -193,11 +259,13 @@ impl Expr {
     ///
     /// If `self` is not a parenthesized expression, it will be returned as is.
     pub fn unwrap_parens(&self) -> &Expr {
-        let mut cur = self;
-        while let Expr::Paren(ref expr) = cur {
-            cur = &expr.expr;
-        }
-        cur
+        self.unwrap_with(|e| {
+            if let Expr::Paren(expr) = e {
+                Some(&expr.expr)
+            } else {
+                None
+            }
+        })
     }
 
     /// Normalize parenthesized expressions.
@@ -206,11 +274,25 @@ impl Expr {
     ///
     /// If `self` is not a parenthesized expression, it will be returned as is.
     pub fn unwrap_parens_mut(&mut self) -> &mut Expr {
-        let mut cur = self;
-        while let Expr::Paren(ref mut expr) = cur {
-            cur = &mut expr.expr;
-        }
-        cur
+        self.unwrap_mut_with(|e| {
+            if let Expr::Paren(expr) = e {
+                Some(&mut expr.expr)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Normalize sequences and parenthesized expressions.
+    ///
+    /// This returns the last expression of a sequence expression or the
+    /// expression of a parenthesized expression.
+    pub fn unwrap_seqs_and_parens(&self) -> &Self {
+        self.unwrap_with(|expr| match expr {
+            Expr::Seq(SeqExpr { exprs, .. }) => exprs.last().map(|v| &**v),
+            Expr::Paren(ParenExpr { expr, .. }) => Some(expr),
+            _ => None,
+        })
     }
 
     /// Creates an expression from `exprs`. This will return first element if
@@ -225,16 +307,67 @@ impl Expr {
         if exprs.len() == 1 {
             exprs.remove(0)
         } else {
-            Box::new(Expr::Seq(SeqExpr {
+            SeqExpr {
                 span: DUMMY_SP,
                 exprs,
-            }))
+            }
+            .into()
         }
     }
 
     /// Returns true for `eval` and member expressions.
     pub fn directness_maters(&self) -> bool {
         self.is_ident_ref_to("eval") || matches!(self, Expr::Member(..))
+    }
+
+    pub fn with_span(mut self, span: Span) -> Expr {
+        self.set_span(span);
+        self
+    }
+
+    pub fn set_span(&mut self, span: Span) {
+        match self {
+            Expr::Ident(i) => {
+                i.span = span;
+            }
+            Expr::This(e) => e.span = span,
+            Expr::Array(e) => e.span = span,
+            Expr::Object(e) => e.span = span,
+            Expr::Fn(e) => e.function.span = span,
+            Expr::Unary(e) => e.span = span,
+            Expr::Update(e) => e.span = span,
+            Expr::Bin(e) => e.span = span,
+            Expr::Assign(e) => e.span = span,
+            Expr::Member(e) => e.span = span,
+            Expr::SuperProp(e) => e.span = span,
+            Expr::Cond(e) => e.span = span,
+            Expr::Call(e) => e.span = span,
+            Expr::New(e) => e.span = span,
+            Expr::Seq(e) => e.span = span,
+            Expr::Tpl(e) => e.span = span,
+            Expr::TaggedTpl(e) => e.span = span,
+            Expr::Arrow(e) => e.span = span,
+            Expr::Class(e) => e.class.span = span,
+            Expr::Yield(e) => e.span = span,
+            Expr::Invalid(e) => e.span = span,
+            Expr::TsAs(e) => e.span = span,
+            Expr::TsTypeAssertion(e) => e.span = span,
+            Expr::TsConstAssertion(e) => e.span = span,
+            Expr::TsSatisfies(e) => e.span = span,
+            Expr::TsNonNull(e) => e.span = span,
+            Expr::TsInstantiation(e) => e.span = span,
+            Expr::MetaProp(e) => e.span = span,
+            Expr::Await(e) => e.span = span,
+            Expr::Paren(e) => e.span = span,
+            Expr::JSXMember(e) => e.span = span,
+            Expr::JSXNamespacedName(e) => e.span = span,
+            Expr::JSXEmpty(e) => e.span = span,
+            Expr::JSXElement(e) => e.span = span,
+            Expr::JSXFragment(e) => e.span = span,
+            Expr::PrivateName(e) => e.span = span,
+            Expr::OptChain(e) => e.span = span,
+            Expr::Lit(e) => e.set_span(span),
+        }
     }
 }
 
@@ -288,10 +421,17 @@ impl Clone for Expr {
 
 impl Take for Expr {
     fn dummy() -> Self {
-        Expr::Invalid(Invalid { span: DUMMY_SP })
+        Invalid { span: DUMMY_SP }.into()
     }
 }
 
+impl Default for Expr {
+    fn default() -> Self {
+        Expr::Invalid(Default::default())
+    }
+}
+
+bridge_expr_from!(Ident, IdentName);
 bridge_expr_from!(Ident, Id);
 bridge_expr_from!(FnExpr, Function);
 bridge_expr_from!(ClassExpr, Class);
@@ -332,16 +472,19 @@ boxed_expr!(JSXEmptyExpr);
 boxed_expr!(Box<JSXElement>);
 boxed_expr!(JSXFragment);
 boxed_expr!(TsTypeAssertion);
+boxed_expr!(TsSatisfiesExpr);
 boxed_expr!(TsConstAssertion);
 boxed_expr!(TsNonNullExpr);
 boxed_expr!(TsAsExpr);
 boxed_expr!(TsInstantiation);
 boxed_expr!(PrivateName);
 boxed_expr!(OptChainExpr);
+boxed_expr!(Invalid);
 
 #[ast_node("ThisExpression")]
 #[derive(Eq, Hash, Copy, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct ThisExpr {
     pub span: Span,
 }
@@ -354,8 +497,9 @@ impl Take for ThisExpr {
 
 /// Array literal.
 #[ast_node("ArrayExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct ArrayLit {
     pub span: Span,
 
@@ -374,8 +518,9 @@ impl Take for ArrayLit {
 
 /// Object literal.
 #[ast_node("ObjectExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct ObjectLit {
     pub span: Span,
 
@@ -388,7 +533,7 @@ impl ObjectLit {
     ///
     /// Returns [None] if this is not a valid for `with` of [crate::ImportDecl].
     pub fn as_import_with(&self) -> Option<ImportWith> {
-        let mut values = vec![];
+        let mut values = Vec::new();
         for prop in &self.props {
             match prop {
                 PropOrSpread::Spread(..) => return None,
@@ -396,7 +541,7 @@ impl ObjectLit {
                     Prop::KeyValue(kv) => {
                         let key = match &kv.key {
                             PropName::Ident(i) => i.clone(),
-                            PropName::Str(s) => Ident::new(s.value.clone(), s.span),
+                            PropName::Str(s) => IdentName::new(s.value.clone(), s.span),
                             _ => return None,
                         };
 
@@ -430,7 +575,7 @@ impl From<ImportWith> for ObjectLit {
                 .map(|item| {
                     PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
                         key: PropName::Ident(item.key),
-                        value: Box::new(Expr::Lit(Lit::Str(item.value))),
+                        value: Lit::Str(item.value).into(),
                     })))
                 })
                 .collect(),
@@ -462,7 +607,7 @@ impl ImportWith {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, EqIgnoreSpan)]
 pub struct ImportWithItem {
-    pub key: Ident,
+    pub key: IdentName,
     pub value: Str,
 }
 
@@ -478,6 +623,7 @@ impl Take for ObjectLit {
 #[ast_node]
 #[derive(Eq, Hash, Is, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub enum PropOrSpread {
     /// Spread properties, e.g., `{a: 1, ...obj, b: 2}`.
     #[tag("SpreadElement")]
@@ -499,8 +645,9 @@ impl Take for PropOrSpread {
 }
 
 #[ast_node("SpreadElement")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct SpreadElement {
     #[cfg_attr(feature = "serde-impl", serde(rename = "spread"))]
     #[span(lo)]
@@ -521,8 +668,9 @@ impl Take for SpreadElement {
 }
 
 #[ast_node("UnaryExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct UnaryExpr {
     pub span: Span,
 
@@ -544,8 +692,9 @@ impl Take for UnaryExpr {
 }
 
 #[ast_node("UpdateExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct UpdateExpr {
     pub span: Span,
 
@@ -570,8 +719,9 @@ impl Take for UpdateExpr {
 }
 
 #[ast_node("BinaryExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct BinExpr {
     pub span: Span,
 
@@ -596,8 +746,9 @@ impl Take for BinExpr {
 
 /// Function expression.
 #[ast_node("FunctionExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct FnExpr {
     #[cfg_attr(feature = "serde-impl", serde(default, rename = "identifier"))]
     pub ident: Option<Ident>,
@@ -630,8 +781,9 @@ bridge_expr_from!(FnExpr, Box<Function>);
 
 /// Class expression.
 #[ast_node("ClassExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct ClassExpr {
     #[cfg_attr(feature = "serde-impl", serde(default, rename = "identifier"))]
     pub ident: Option<Ident>,
@@ -660,8 +812,9 @@ bridge_from!(ClassExpr, Box<Class>, Class);
 bridge_expr_from!(ClassExpr, Box<Class>);
 
 #[ast_node("AssignmentExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct AssignExpr {
     pub span: Span,
 
@@ -691,8 +844,9 @@ impl AssignExpr {
 }
 
 #[ast_node("MemberExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct MemberExpr {
     pub span: Span,
 
@@ -706,9 +860,10 @@ pub struct MemberExpr {
 #[ast_node]
 #[derive(Eq, Hash, Is, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub enum MemberProp {
     #[tag("Identifier")]
-    Ident(Ident),
+    Ident(IdentName),
     #[tag("PrivateName")]
     PrivateName(PrivateName),
     #[tag("Computed")]
@@ -722,8 +877,9 @@ impl MemberProp {
 }
 
 #[ast_node("SuperPropExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct SuperPropExpr {
     pub span: Span,
 
@@ -736,9 +892,10 @@ pub struct SuperPropExpr {
 #[ast_node]
 #[derive(Eq, Hash, Is, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub enum SuperProp {
     #[tag("Identifier")]
-    Ident(Ident),
+    Ident(IdentName),
     #[tag("Computed")]
     Computed(ComputedPropName),
 }
@@ -755,19 +912,32 @@ impl Take for MemberExpr {
 
 impl Take for MemberProp {
     fn dummy() -> Self {
-        MemberProp::Ident(Ident::dummy())
+        Default::default()
+    }
+}
+
+impl Default for MemberProp {
+    fn default() -> Self {
+        MemberProp::Ident(Default::default())
     }
 }
 
 impl Take for SuperProp {
     fn dummy() -> Self {
-        SuperProp::Ident(Ident::dummy())
+        SuperProp::Ident(Default::default())
+    }
+}
+
+impl Default for SuperProp {
+    fn default() -> Self {
+        SuperProp::Ident(Default::default())
     }
 }
 
 #[ast_node("ConditionalExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct CondExpr {
     pub span: Span,
 
@@ -792,10 +962,12 @@ impl Take for CondExpr {
 }
 
 #[ast_node("CallExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct CallExpr {
     pub span: Span,
+    pub ctxt: SyntaxContext,
 
     pub callee: Callee,
 
@@ -809,20 +981,18 @@ pub struct CallExpr {
 
 impl Take for CallExpr {
     fn dummy() -> Self {
-        CallExpr {
-            span: DUMMY_SP,
-            callee: Take::dummy(),
-            args: Take::dummy(),
-            type_args: Take::dummy(),
-        }
+        Default::default()
     }
 }
 
 #[ast_node("NewExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct NewExpr {
     pub span: Span,
+
+    pub ctxt: SyntaxContext,
 
     pub callee: Box<Expr>,
 
@@ -836,18 +1006,14 @@ pub struct NewExpr {
 
 impl Take for NewExpr {
     fn dummy() -> Self {
-        NewExpr {
-            span: DUMMY_SP,
-            callee: Take::dummy(),
-            args: Take::dummy(),
-            type_args: Take::dummy(),
-        }
+        Default::default()
     }
 }
 
 #[ast_node("SequenceExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct SeqExpr {
     pub span: Span,
 
@@ -865,10 +1031,13 @@ impl Take for SeqExpr {
 }
 
 #[ast_node("ArrowFunctionExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct ArrowExpr {
     pub span: Span,
+
+    pub ctxt: SyntaxContext,
 
     pub params: Vec<Pat>,
 
@@ -891,20 +1060,15 @@ pub struct ArrowExpr {
 impl Take for ArrowExpr {
     fn dummy() -> Self {
         ArrowExpr {
-            span: DUMMY_SP,
-            params: Take::dummy(),
-            body: Take::dummy(),
-            is_async: false,
-            is_generator: false,
-            type_params: Take::dummy(),
-            return_type: Take::dummy(),
+            ..Default::default()
         }
     }
 }
 
 #[ast_node("YieldExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct YieldExpr {
     pub span: Span,
 
@@ -928,6 +1092,7 @@ impl Take for YieldExpr {
 #[ast_node("MetaProperty")]
 #[derive(Eq, Hash, EqIgnoreSpan, Copy)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct MetaPropExpr {
     pub span: Span,
     pub kind: MetaPropKind,
@@ -939,8 +1104,9 @@ pub struct MetaPropExpr {
     any(feature = "rkyv-impl"),
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-#[cfg_attr(feature = "rkyv-impl", archive(check_bytes))]
-#[cfg_attr(feature = "rkyv-impl", archive_attr(repr(u32)))]
+#[cfg_attr(feature = "rkyv-impl", derive(bytecheck::CheckBytes))]
+#[cfg_attr(feature = "rkyv-impl", repr(u32))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub enum MetaPropKind {
     /// `new.target`
     NewTarget,
@@ -949,8 +1115,9 @@ pub enum MetaPropKind {
 }
 
 #[ast_node("AwaitExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct AwaitExpr {
     pub span: Span,
 
@@ -959,8 +1126,9 @@ pub struct AwaitExpr {
 }
 
 #[ast_node("TemplateLiteral")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct Tpl {
     pub span: Span,
 
@@ -981,10 +1149,13 @@ impl Take for Tpl {
 }
 
 #[ast_node("TaggedTemplateExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct TaggedTpl {
     pub span: Span,
+
+    pub ctxt: SyntaxContext,
 
     pub tag: Box<Expr>,
 
@@ -998,17 +1169,13 @@ pub struct TaggedTpl {
 
 impl Take for TaggedTpl {
     fn dummy() -> Self {
-        TaggedTpl {
-            span: DUMMY_SP,
-            tag: Take::dummy(),
-            type_params: Take::dummy(),
-            tpl: Take::dummy(),
-        }
+        Default::default()
     }
 }
 
 #[ast_node("TemplateElement")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct TplElement {
     pub span: Span,
     pub tail: bool,
@@ -1020,6 +1187,8 @@ pub struct TplElement {
     /// don't have to worry about this value.
     pub cooked: Option<Atom>,
 
+    /// You may need to perform. `.replace("\r\n", "\n").replace('\r', "\n")` on
+    /// this value.
     pub raw: Atom,
 }
 
@@ -1052,8 +1221,9 @@ impl<'a> arbitrary::Arbitrary<'a> for TplElement {
 }
 
 #[ast_node("ParenthesisExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct ParenExpr {
     pub span: Span,
 
@@ -1072,6 +1242,7 @@ impl Take for ParenExpr {
 #[ast_node]
 #[derive(Eq, Hash, Is, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub enum Callee {
     #[tag("Super")]
     #[is(name = "super_")]
@@ -1084,6 +1255,12 @@ pub enum Callee {
     Expr(Box<Expr>),
 }
 
+impl Default for Callee {
+    fn default() -> Self {
+        Callee::Super(Default::default())
+    }
+}
+
 impl Take for Callee {
     fn dummy() -> Self {
         Callee::Super(Take::dummy())
@@ -1091,8 +1268,9 @@ impl Take for Callee {
 }
 
 #[ast_node("Super")]
-#[derive(Eq, Hash, Copy, EqIgnoreSpan)]
+#[derive(Eq, Hash, Copy, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct Super {
     pub span: Span,
 }
@@ -1106,6 +1284,7 @@ impl Take for Super {
 #[ast_node("Import")]
 #[derive(Eq, Hash, Copy, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct Import {
     pub span: Span,
     pub phase: ImportPhase,
@@ -1122,28 +1301,36 @@ impl Take for Import {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 #[cfg_attr(
     any(feature = "rkyv-impl"),
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 #[cfg_attr(
-    any(feature = "rkyv-impl"),
-    archive(bound(
-        serialize = "__S: rkyv::ser::Serializer + rkyv::ser::ScratchSpace + \
-                     rkyv::ser::SharedSerializeRegistry",
-        deserialize = "__D: rkyv::de::SharedDeserializeRegistry"
-    ))
+    feature = "rkyv",
+    rkyv(serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator,
+        __S::Error: rkyv::rancor::Source))
 )]
-#[cfg_attr(feature = "rkyv-impl", archive(check_bytes))]
-#[cfg_attr(feature = "rkyv-impl", archive_attr(repr(C)))]
+#[cfg_attr(
+    feature = "rkyv-impl",
+    rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))
+)]
+#[cfg_attr(
+                    feature = "rkyv-impl",
+                    rkyv(bytecheck(bounds(
+                        __C: rkyv::validation::ArchiveContext,
+                        __C::Error: rkyv::rancor::Source
+                    )))
+                )]
+#[cfg_attr(feature = "rkyv-impl", repr(C))]
 #[cfg_attr(feature = "serde-impl", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExprOrSpread {
     #[cfg_attr(feature = "serde-impl", serde(default))]
-    #[cfg_attr(feature = "__rkyv", omit_bounds)]
+    #[cfg_attr(feature = "__rkyv", rkyv(omit_bounds))]
     pub spread: Option<Span>,
 
     #[cfg_attr(feature = "serde-impl", serde(rename = "expression"))]
-    #[cfg_attr(feature = "__rkyv", omit_bounds)]
+    #[cfg_attr(feature = "__rkyv", rkyv(omit_bounds))]
     pub expr: Box<Expr>,
 }
 
@@ -1183,11 +1370,18 @@ bridge_from!(ExprOrSpread, Box<Expr>, Expr);
 #[derive(Eq, Hash, Is, EqIgnoreSpan)]
 #[allow(variant_size_differences)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub enum BlockStmtOrExpr {
     #[tag("BlockStatement")]
     BlockStmt(BlockStmt),
     #[tag("*")]
     Expr(Box<Expr>),
+}
+
+impl Default for BlockStmtOrExpr {
+    fn default() -> Self {
+        BlockStmtOrExpr::BlockStmt(Default::default())
+    }
 }
 
 impl<T> From<T> for BlockStmtOrExpr
@@ -1208,6 +1402,7 @@ impl Take for BlockStmtOrExpr {
 #[ast_node]
 #[derive(Is, Eq, Hash, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub enum AssignTarget {
     #[tag("Identifier")]
     #[tag("MemberExpression")]
@@ -1238,7 +1433,7 @@ impl TryFrom<Pat> for AssignTarget {
 
             Pat::Expr(e) => match Self::try_from(e) {
                 Ok(v) => v,
-                Err(e) => return Err(Pat::Expr(e)),
+                Err(e) => return Err(e.into()),
             },
 
             _ => return Err(p),
@@ -1264,6 +1459,7 @@ impl TryFrom<Box<Expr>> for AssignTarget {
 #[ast_node]
 #[derive(Is, Eq, Hash, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub enum AssignTargetPat {
     #[tag("ArrayPattern")]
     Array(ArrayPat),
@@ -1275,6 +1471,12 @@ pub enum AssignTargetPat {
 
 impl Take for AssignTargetPat {
     fn dummy() -> Self {
+        Default::default()
+    }
+}
+
+impl Default for AssignTargetPat {
+    fn default() -> Self {
         AssignTargetPat::Invalid(Take::dummy())
     }
 }
@@ -1282,9 +1484,9 @@ impl Take for AssignTargetPat {
 impl From<AssignTargetPat> for Pat {
     fn from(pat: AssignTargetPat) -> Self {
         match pat {
-            AssignTargetPat::Array(a) => Pat::Array(a),
-            AssignTargetPat::Object(o) => Pat::Object(o),
-            AssignTargetPat::Invalid(i) => Pat::Invalid(i),
+            AssignTargetPat::Array(a) => a.into(),
+            AssignTargetPat::Object(o) => o.into(),
+            AssignTargetPat::Invalid(i) => i.into(),
         }
     }
 }
@@ -1312,6 +1514,7 @@ impl TryFrom<Pat> for AssignTargetPat {
 #[ast_node]
 #[derive(Is, Eq, Hash, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub enum SimpleAssignTarget {
     /// Note: This type is to help implementing visitor and the field `type_ann`
     /// is always [None].
@@ -1363,10 +1566,12 @@ impl TryFrom<Box<Expr>> for SimpleAssignTarget {
 bridge_from!(SimpleAssignTarget, BindingIdent, Ident);
 
 impl SimpleAssignTarget {
-    pub fn leftmost(&self) -> Option<&Ident> {
+    pub fn leftmost(&self) -> Option<Cow<Ident>> {
         match self {
-            SimpleAssignTarget::Ident(i) => Some(&i.id),
-            SimpleAssignTarget::Member(MemberExpr { obj, .. }) => obj.leftmost(),
+            SimpleAssignTarget::Ident(i) => {
+                Some(Cow::Owned(Ident::new(i.sym.clone(), i.span, i.ctxt)))
+            }
+            SimpleAssignTarget::Member(MemberExpr { obj, .. }) => obj.leftmost().map(Cow::Borrowed),
             _ => None,
         }
     }
@@ -1394,40 +1599,47 @@ bridge_from!(AssignTarget, AssignTargetPat, ObjectPat);
 impl From<SimpleAssignTarget> for Box<Expr> {
     fn from(s: SimpleAssignTarget) -> Self {
         match s {
-            SimpleAssignTarget::Ident(i) => Box::new(Expr::Ident(i.id)),
-            SimpleAssignTarget::Member(m) => Box::new(Expr::Member(m)),
-            SimpleAssignTarget::SuperProp(s) => Box::new(Expr::SuperProp(s)),
-            SimpleAssignTarget::Paren(s) => Box::new(Expr::Paren(s)),
-            SimpleAssignTarget::OptChain(s) => Box::new(Expr::OptChain(s)),
-            SimpleAssignTarget::TsAs(a) => Box::new(Expr::TsAs(a)),
-            SimpleAssignTarget::TsSatisfies(s) => Box::new(Expr::TsSatisfies(s)),
-            SimpleAssignTarget::TsNonNull(n) => Box::new(Expr::TsNonNull(n)),
-            SimpleAssignTarget::TsTypeAssertion(a) => Box::new(Expr::TsTypeAssertion(a)),
-            SimpleAssignTarget::TsInstantiation(a) => Box::new(Expr::TsInstantiation(a)),
-            SimpleAssignTarget::Invalid(i) => Box::new(Expr::Invalid(i)),
+            SimpleAssignTarget::Ident(i) => i.into(),
+            SimpleAssignTarget::Member(m) => m.into(),
+            SimpleAssignTarget::SuperProp(s) => s.into(),
+            SimpleAssignTarget::Paren(s) => s.into(),
+            SimpleAssignTarget::OptChain(s) => s.into(),
+            SimpleAssignTarget::TsAs(a) => a.into(),
+            SimpleAssignTarget::TsSatisfies(s) => s.into(),
+            SimpleAssignTarget::TsNonNull(n) => n.into(),
+            SimpleAssignTarget::TsTypeAssertion(a) => a.into(),
+            SimpleAssignTarget::TsInstantiation(a) => a.into(),
+            SimpleAssignTarget::Invalid(i) => i.into(),
         }
     }
 }
 
 impl AssignTarget {
-    pub fn as_ident(&self) -> Option<&Ident> {
-        Some(&self.as_simple()?.as_ident()?.id)
+    pub fn as_ident(&self) -> Option<&BindingIdent> {
+        self.as_simple()?.as_ident()
     }
 
-    pub fn as_ident_mut(&mut self) -> Option<&mut Ident> {
-        Some(&mut self.as_mut_simple()?.as_mut_ident()?.id)
+    pub fn as_ident_mut(&mut self) -> Option<&mut BindingIdent> {
+        self.as_mut_simple()?.as_mut_ident()
+    }
+}
+
+impl Default for AssignTarget {
+    fn default() -> Self {
+        SimpleAssignTarget::dummy().into()
     }
 }
 
 impl Take for AssignTarget {
     fn dummy() -> Self {
-        SimpleAssignTarget::dummy().into()
+        Default::default()
     }
 }
 
 #[ast_node("OptionalChainingExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct OptChainExpr {
     pub span: Span,
     pub optional: bool,
@@ -1438,6 +1650,7 @@ pub struct OptChainExpr {
 #[ast_node]
 #[derive(Eq, Hash, Is, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub enum OptChainBase {
     #[tag("MemberExpression")]
     Member(MemberExpr),
@@ -1445,11 +1658,20 @@ pub enum OptChainBase {
     Call(OptCall),
 }
 
+impl Default for OptChainBase {
+    fn default() -> Self {
+        OptChainBase::Member(Default::default())
+    }
+}
+
 #[ast_node("CallExpression")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct OptCall {
     pub span: Span,
+
+    pub ctxt: SyntaxContext,
 
     pub callee: Box<Expr>,
 
@@ -1476,6 +1698,7 @@ impl From<OptChainBase> for Expr {
         match opt {
             OptChainBase::Call(OptCall {
                 span,
+                ctxt,
                 callee,
                 args,
                 type_args,
@@ -1484,6 +1707,7 @@ impl From<OptChainBase> for Expr {
                 args,
                 span,
                 type_args,
+                ctxt,
             }),
             OptChainBase::Member(member) => Self::Member(member),
         }
@@ -1493,10 +1717,7 @@ impl From<OptChainBase> for Expr {
 impl Take for OptCall {
     fn dummy() -> Self {
         Self {
-            span: DUMMY_SP,
-            callee: Take::dummy(),
-            args: Vec::new(),
-            type_args: None,
+            ..Default::default()
         }
     }
 }
@@ -1505,6 +1726,7 @@ impl From<OptCall> for CallExpr {
     fn from(
         OptCall {
             span,
+            ctxt,
             callee,
             args,
             type_args,
@@ -1515,6 +1737,7 @@ impl From<OptCall> for CallExpr {
             callee: Callee::Expr(callee),
             args,
             type_args,
+            ctxt,
         }
     }
 }

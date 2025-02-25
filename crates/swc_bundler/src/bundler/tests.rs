@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use anyhow::Error;
 use indexmap::IndexMap;
-use swc_common::{collections::ARandomState, sync::Lrc, FileName, SourceMap, Span, GLOBALS};
+use rustc_hash::FxBuildHasher;
+use swc_common::{sync::Lrc, FileName, SourceMap, Span, GLOBALS};
 use swc_ecma_ast::*;
 use swc_ecma_loader::resolve::Resolution;
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput};
@@ -20,7 +21,7 @@ pub(crate) struct Tester<'a> {
 
 pub struct Loader {
     cm: Lrc<SourceMap>,
-    files: IndexMap<String, String, ARandomState>,
+    files: IndexMap<String, String, FxBuildHasher>,
 }
 
 impl Load for Loader {
@@ -29,7 +30,7 @@ impl Load for Loader {
         let v = self.files.get(&f.to_string());
         let v = v.unwrap();
 
-        let fm = self.cm.new_source_file(f.clone(), v.to_string());
+        let fm = self.cm.new_source_file(f.clone().into(), v.to_string());
 
         let lexer = Lexer::new(
             Default::default(),
@@ -69,7 +70,7 @@ impl Resolve for Resolver {
     }
 }
 
-impl<'a> Tester<'a> {
+impl Tester<'_> {
     pub fn module(&self, name: &str) -> TransformedModule {
         self.bundler
             .scope
@@ -81,7 +82,7 @@ impl<'a> Tester<'a> {
     pub fn parse(&self, s: &str) -> Module {
         let fm = self
             .cm
-            .new_source_file(FileName::Real(PathBuf::from("input.js")), s.into());
+            .new_source_file(FileName::Real(PathBuf::from("input.js")).into(), s.into());
 
         let lexer = Lexer::new(
             Default::default(),
@@ -112,7 +113,7 @@ pub(crate) fn suite() -> TestBuilder {
 
 #[derive(Default)]
 pub(crate) struct TestBuilder {
-    files: IndexMap<String, String, ARandomState>,
+    files: IndexMap<String, String, FxBuildHasher>,
 }
 
 impl TestBuilder {
@@ -141,7 +142,7 @@ impl TestBuilder {
                         disable_hygiene: false,
                         disable_fixer: false,
                         disable_dce: false,
-                        external_modules: vec![],
+                        external_modules: Vec::new(),
                         module: Default::default(),
                     },
                     Box::new(Hook),
