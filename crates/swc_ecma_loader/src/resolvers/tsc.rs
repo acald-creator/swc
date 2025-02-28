@@ -232,7 +232,7 @@ where
                         debug!("Extra: `{}`", extra);
                     }
 
-                    let mut errors = vec![];
+                    let mut errors = Vec::new();
                     for target in to {
                         let replaced = target.replace('*', extra);
 
@@ -302,7 +302,7 @@ where
                         .split([std::path::MAIN_SEPARATOR, '/'])
                         .last()
                         .filter(|&slug| slug != "index.ts" && slug != "index.tsx")
-                        .map(|v| v.split_once('.').map(|v| v.0).unwrap_or(v))
+                        .map(|v| v.rsplit_once('.').map(|v| v.0).unwrap_or(v))
                         .map(From::from);
 
                     if tp.is_absolute() {
@@ -326,7 +326,8 @@ where
             }
         }
 
-        if !module_specifier.starts_with('.') {
+        let path = Path::new(module_specifier);
+        if matches!(path.components().next(), Some(Component::Normal(_))) {
             let path = self.base_url.join(module_specifier);
 
             // https://www.typescriptlang.org/docs/handbook/modules/reference.html#baseurl

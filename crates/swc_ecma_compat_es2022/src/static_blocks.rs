@@ -1,18 +1,15 @@
-use swc_atoms::JsWord;
-use swc_common::{collections::AHashSet, util::take::Take, Mark, DUMMY_SP};
+use rustc_hash::FxHashSet;
+use swc_atoms::Atom;
+use swc_common::{source_map::PLACEHOLDER_SP, util::take::Take};
 use swc_ecma_ast::*;
 use swc_ecma_utils::ExprFactory;
-use swc_ecma_visit::{as_folder, noop_visit_mut_type, Fold, VisitMut, VisitMutWith};
+use swc_ecma_visit::{noop_visit_mut_type, visit_mut_pass, VisitMut, VisitMutWith};
 use swc_trace_macro::swc_trace;
 
-struct ClassStaticBlock {
-    mark: Mark,
-}
+struct ClassStaticBlock;
 
-pub fn static_blocks(static_block_mark: Mark) -> impl Fold + VisitMut {
-    as_folder(ClassStaticBlock {
-        mark: static_block_mark,
-    })
+pub fn static_blocks() -> impl Pass {
+    visit_mut_pass(ClassStaticBlock)
 }
 
 #[swc_trace]
@@ -20,7 +17,7 @@ impl ClassStaticBlock {
     fn transform_static_block(
         &mut self,
         mut static_block: StaticBlock,
-        private_id: JsWord,
+        private_id: Atom,
     ) -> PrivateProp {
         let mut stmts = static_block.body.stmts.take();
         let span = static_block.span;
@@ -32,59 +29,43 @@ impl ClassStaticBlock {
         } else {
             static_block.body.stmts = stmts;
 
-            let expr = Expr::Call(CallExpr {
-                span: DUMMY_SP,
+            let expr = CallExpr {
                 callee: ArrowExpr {
-                    span: DUMMY_SP,
-                    params: Vec::new(),
-                    is_async: false,
-                    is_generator: false,
-                    type_params: None,
-                    return_type: None,
                     body: Box::new(BlockStmtOrExpr::BlockStmt(static_block.body)),
+                    ..Default::default()
                 }
                 .as_callee(),
-                args: Vec::new(),
-                type_args: None,
-            });
+                ..Default::default()
+            }
+            .into();
 
             Some(Box::new(expr))
         };
 
         PrivateProp {
-            span: span.apply_mark(self.mark),
+            span,
             is_static: true,
-            is_optional: false,
-            is_override: false,
-            readonly: false,
-            type_ann: None,
-            decorators: Vec::new(),
-            accessibility: None,
             key: PrivateName {
-                span: DUMMY_SP,
-                id: Ident {
-                    span: DUMMY_SP,
-                    sym: private_id,
-                    optional: false,
-                },
+                span: PLACEHOLDER_SP,
+                name: private_id,
             },
             value,
-            definite: false,
+            ..Default::default()
         }
     }
 }
 
 #[swc_trace]
 impl VisitMut for ClassStaticBlock {
-    noop_visit_mut_type!();
+    noop_visit_mut_type!(fail);
 
     fn visit_mut_class(&mut self, class: &mut Class) {
         class.visit_mut_children_with(self);
 
-        let mut private_names = AHashSet::default();
+        let mut private_names = FxHashSet::default();
         for member in &class.body {
             if let ClassMember::PrivateProp(private_property) = member {
-                private_names.insert(private_property.key.id.sym.clone());
+                private_names.insert(private_property.key.name.clone());
             }
         }
 
@@ -105,10 +86,10 @@ impl VisitMut for ClassStaticBlock {
     }
 }
 
-fn generate_uid(deny_list: &AHashSet<JsWord>, i: &mut u32) -> JsWord {
+fn generate_uid(deny_list: &FxHashSet<Atom>, i: &mut u32) -> Atom {
     *i += 1;
 
-    let mut uid: JsWord = if *i == 1 {
+    let mut uid: Atom = if *i == 1 {
         "_".to_string()
     } else {
         format!("_{i}")

@@ -26,20 +26,15 @@
 //! ## `plugin-mode`
 //!
 //! Allows replacing operations related to thread-local variables with a trait.
-//!
-//!
-//! ## `ahash`
-//!
-//! Use `ahash` instead of `rustc_hash` for `AHashMap` and `AHashSet`.
 #![deny(clippy::all)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(not(test), allow(unused))]
 
 use std::fmt::Debug;
 
 pub use ast_node::{ast_node, ast_serde, DeserializeEnum, Spanned};
 pub use from_variant::FromVariant;
 pub use swc_eq_ignore_macros::{EqIgnoreSpan, TypeEq};
-pub use swc_visit::chain;
 
 pub use self::{
     eq::{EqIgnoreSpan, TypeEq},
@@ -52,15 +47,13 @@ pub use self::{
     source_map::{FileLines, FileLoader, FilePathMapping, SourceMap, SpanSnippetError},
     syntax_pos::LineCol,
 };
-#[doc(hidden)]
-pub mod private;
 
 /// A trait for ast nodes.
 pub trait AstNode: Debug + PartialEq + Clone + Spanned {
     const TYPE: &'static str;
 }
 
-pub mod collections;
+pub mod cache;
 pub mod comments;
 mod eq;
 pub mod errors;
@@ -69,6 +62,8 @@ pub mod iter;
 pub mod pass;
 pub mod plugin;
 mod pos;
+#[doc(hidden)]
+pub mod private;
 mod rustc_data_structures;
 pub mod serializer;
 pub mod source_map;

@@ -1,12 +1,12 @@
-use swc_atoms::JsWord;
+use swc_atoms::Atom;
 use swc_ecma_ast::*;
 use swc_ecma_transforms_base::perf::Parallel;
 use swc_ecma_visit::{
-    as_folder, noop_visit_mut_type, visit_mut_obj_and_computed, Fold, VisitMut, VisitMutWith,
+    noop_visit_mut_type, visit_mut_obj_and_computed, visit_mut_pass, VisitMut, VisitMutWith,
 };
 
-pub fn reserved_words() -> impl 'static + Fold + VisitMut {
-    as_folder(EsReservedWord)
+pub fn reserved_words() -> impl 'static + Pass + VisitMut {
+    visit_mut_pass(EsReservedWord)
 }
 
 #[derive(Clone, Copy)]
@@ -21,7 +21,7 @@ impl Parallel for EsReservedWord {
 }
 
 impl VisitMut for EsReservedWord {
-    noop_visit_mut_type!();
+    noop_visit_mut_type!(fail);
 
     visit_mut_obj_and_computed!();
 
@@ -86,7 +86,7 @@ fn is_reserved(sym: &str) -> bool {
     )
 }
 
-fn rename_ident(sym: &mut JsWord, _strict: bool) {
+fn rename_ident(sym: &mut Atom, _strict: bool) {
     // Es
     if is_reserved(&*sym) {
         let s = format!("_{}", sym).into();

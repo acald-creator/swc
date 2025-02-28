@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use rustc_hash::FxHashMap;
+use indexmap::IndexMap;
 use serde::Serialize;
-use swc_atoms::JsWord;
+use swc_atoms::Atom;
 use swc_css_codegen::{
     writer::basic::{BasicCssWriter, BasicCssWriterConfig, IndentType},
     CodeGenerator, Emit,
@@ -15,7 +15,7 @@ use testing::NormalizedOutput;
 fn imports(input: PathBuf) {
     testing::run_test(false, |cm, _| {
         let fm = cm.load_file(&input).unwrap();
-        let mut errors = vec![];
+        let mut errors = Vec::new();
         let ss = swc_css_parser::parse_file(
             &fm,
             None,
@@ -49,7 +49,7 @@ fn imports(input: PathBuf) {
 fn compile(input: PathBuf) {
     testing::run_test(false, |cm, _| {
         let fm = cm.load_file(&input).unwrap();
-        let mut errors = vec![];
+        let mut errors = Vec::new();
         let mut ss = swc_css_parser::parse_file(
             &fm,
             None,
@@ -89,7 +89,7 @@ fn compile(input: PathBuf) {
             .unwrap();
 
         if !transform_result.renamed.is_empty() {
-            let transformed_classes = &transform_result
+            let mut transformed_classes = transform_result
                 .renamed
                 .into_iter()
                 .map(|(k, v)| {
@@ -113,7 +113,9 @@ fn compile(input: PathBuf) {
                             .collect::<Vec<_>>(),
                     )
                 })
-                .collect::<FxHashMap<_, _>>();
+                .collect::<IndexMap<_, _>>();
+
+            transformed_classes.sort_keys();
 
             NormalizedOutput::compare_json_to_file(
                 &transformed_classes,
@@ -133,23 +135,23 @@ fn compile(input: PathBuf) {
 enum CssClassNameForTest {
     Local {
         /// Tranformed css class name
-        name: JsWord,
+        name: Atom,
     },
     Global {
-        name: JsWord,
+        name: Atom,
     },
     Import {
         /// The exported class name. This is the value specified by the user.
-        name: JsWord,
+        name: Atom,
         /// The module specifier.
-        from: JsWord,
+        from: Atom,
     },
 }
 
 struct TestConfig {}
 
 impl swc_css_modules::TransformConfig for TestConfig {
-    fn new_name_for(&self, local: &JsWord) -> JsWord {
+    fn new_name_for(&self, local: &Atom) -> Atom {
         format!("__local__{}", local).into()
     }
 }

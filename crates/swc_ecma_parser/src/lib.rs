@@ -58,7 +58,7 @@
 //!     //     .load_file(Path::new("test.js"))
 //!     //     .expect("failed to load test.js");
 //!     let fm = cm.new_source_file(
-//!         FileName::Custom("test.js".into()),
+//!         FileName::Custom("test.js".into()).into(),
 //!         "function foo() {}".into(),
 //!     );
 //!     let lexer = Lexer::new(
@@ -127,15 +127,11 @@
 use error::Error;
 use lexer::Lexer;
 use serde::{Deserialize, Serialize};
+pub use swc_common::input::{Input, StringInput};
 use swc_common::{comments::Comments, input::SourceFileInput, SourceFile};
 use swc_ecma_ast::*;
 
-pub use self::{
-    lexer::input::{Input, StringInput},
-    parser::*,
-};
-#[deprecated(note = "Use `EsVersion` instead")]
-pub type JscTarget = EsVersion;
+pub use self::parser::*;
 
 #[macro_use]
 mod macros;
@@ -150,12 +146,12 @@ mod parser;
 pub enum Syntax {
     /// Standard
     #[serde(rename = "ecmascript")]
-    Es(EsConfig),
+    Es(EsSyntax),
     /// This variant requires the cargo feature `typescript` to be enabled.
     #[cfg(feature = "typescript")]
     #[cfg_attr(docsrs, doc(cfg(feature = "typescript")))]
     #[serde(rename = "typescript")]
-    Typescript(TsConfig),
+    Typescript(TsSyntax),
 }
 
 impl Default for Syntax {
@@ -167,7 +163,7 @@ impl Default for Syntax {
 impl Syntax {
     fn auto_accessors(self) -> bool {
         match self {
-            Syntax::Es(EsConfig {
+            Syntax::Es(EsSyntax {
                 auto_accessors: true,
                 ..
             }) => true,
@@ -179,7 +175,7 @@ impl Syntax {
 
     pub fn import_attributes(self) -> bool {
         match self {
-            Syntax::Es(EsConfig {
+            Syntax::Es(EsSyntax {
                 import_attributes, ..
             }) => import_attributes,
             #[cfg(feature = "typescript")]
@@ -190,24 +186,24 @@ impl Syntax {
     /// Should we parse jsx?
     pub fn jsx(self) -> bool {
         match self {
-            Syntax::Es(EsConfig { jsx: true, .. }) => true,
+            Syntax::Es(EsSyntax { jsx: true, .. }) => true,
             #[cfg(feature = "typescript")]
-            Syntax::Typescript(TsConfig { tsx: true, .. }) => true,
+            Syntax::Typescript(TsSyntax { tsx: true, .. }) => true,
             _ => false,
         }
     }
 
     pub fn fn_bind(self) -> bool {
-        matches!(self, Syntax::Es(EsConfig { fn_bind: true, .. }))
+        matches!(self, Syntax::Es(EsSyntax { fn_bind: true, .. }))
     }
 
     pub fn decorators(self) -> bool {
         match self {
-            Syntax::Es(EsConfig {
+            Syntax::Es(EsSyntax {
                 decorators: true, ..
             }) => true,
             #[cfg(feature = "typescript")]
-            Syntax::Typescript(TsConfig {
+            Syntax::Typescript(TsSyntax {
                 decorators: true, ..
             }) => true,
             _ => false,
@@ -216,7 +212,7 @@ impl Syntax {
 
     pub fn decorators_before_export(self) -> bool {
         match self {
-            Syntax::Es(EsConfig {
+            Syntax::Es(EsSyntax {
                 decorators_before_export: true,
                 ..
             }) => true,
@@ -241,7 +237,7 @@ impl Syntax {
     pub fn export_default_from(self) -> bool {
         matches!(
             self,
-            Syntax::Es(EsConfig {
+            Syntax::Es(EsSyntax {
                 export_default_from: true,
                 ..
             })
@@ -258,7 +254,7 @@ impl Syntax {
 
     pub(crate) fn allow_super_outside_method(self) -> bool {
         match self {
-            Syntax::Es(EsConfig {
+            Syntax::Es(EsSyntax {
                 allow_super_outside_method,
                 ..
             }) => allow_super_outside_method,
@@ -269,7 +265,7 @@ impl Syntax {
 
     pub(crate) fn allow_return_outside_function(self) -> bool {
         match self {
-            Syntax::Es(EsConfig {
+            Syntax::Es(EsSyntax {
                 allow_return_outside_function,
                 ..
             }) => allow_return_outside_function,
@@ -296,7 +292,7 @@ impl Syntax {
 
     pub fn explicit_resource_management(&self) -> bool {
         match self {
-            Syntax::Es(EsConfig {
+            Syntax::Es(EsSyntax {
                 explicit_resource_management: using_decl,
                 ..
             }) => *using_decl,
@@ -308,7 +304,7 @@ impl Syntax {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TsConfig {
+pub struct TsSyntax {
     #[serde(default)]
     pub tsx: bool,
 
@@ -333,7 +329,7 @@ pub struct TsConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct EsConfig {
+pub struct EsSyntax {
     #[serde(default)]
     pub jsx: bool,
 
@@ -454,7 +450,7 @@ where
     use swc_common::FileName;
 
     ::testing::run_test(false, |cm, handler| {
-        let fm = cm.new_source_file(FileName::Real("testing".into()), src.into());
+        let fm = cm.new_source_file(FileName::Real("testing".into()).into(), src.into());
 
         f(handler, (&*fm).into())
     })

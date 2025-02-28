@@ -5,15 +5,17 @@
 #![allow(clippy::nonminimal_bool)]
 #![allow(non_local_definitions)]
 
-use std::{borrow::Cow, fmt::Write, io};
+use std::{borrow::Cow, fmt::Write, io, ops::Deref, str};
 
+use ascii::AsciiChar;
+use compact_str::{format_compact, CompactString};
 use memchr::memmem::Finder;
 use once_cell::sync::Lazy;
 use swc_atoms::Atom;
 use swc_common::{
     comments::{CommentKind, Comments},
     sync::Lrc,
-    BytePos, SourceMapper, Span, Spanned, DUMMY_SP,
+    BytePos, SourceMap, SourceMapper, Span, Spanned, DUMMY_SP,
 };
 use swc_ecma_ast::*;
 use swc_ecma_codegen_macros::emitter;
@@ -38,6 +40,36 @@ pub mod util;
 
 pub type Result = io::Result<()>;
 
+/// Generate a code from a syntax node using default options.
+pub fn to_code_default(
+    cm: Lrc<SourceMap>,
+    comments: Option<&dyn Comments>,
+    node: &impl Node,
+) -> String {
+    let mut buf = std::vec::Vec::new();
+    {
+        let mut emitter = Emitter {
+            cfg: Default::default(),
+            cm: cm.clone(),
+            comments,
+            wr: text_writer::JsWriter::new(cm, "\n", &mut buf, None),
+        };
+        node.emit_with(&mut emitter).unwrap();
+    }
+
+    String::from_utf8(buf).expect("codegen generated non-utf8 output")
+}
+
+/// Generate a code from a syntax node using default options.
+pub fn to_code_with_comments(comments: Option<&dyn Comments>, node: &impl Node) -> String {
+    to_code_default(Default::default(), comments, node)
+}
+
+/// Generate a code from a syntax node using default options.
+pub fn to_code(node: &impl Node) -> String {
+    to_code_with_comments(None, node)
+}
+
 pub trait Node: Spanned {
     fn emit_with<W, S>(&self, e: &mut Emitter<'_, W, S>) -> Result
     where
@@ -54,7 +86,7 @@ impl<N: Node> Node for Box<N> {
         (**self).emit_with(e)
     }
 }
-impl<'a, N: Node> Node for &'a N {
+impl<N: Node> Node for &N {
     #[inline]
     fn emit_with<W, S>(&self, e: &mut Emitter<'_, W, S>) -> Result
     where
@@ -76,7 +108,23 @@ where
     pub wr: W,
 }
 
-fn replace_close_inline_script(raw: &str) -> Cow<str> {
+enum CowStr<'a> {
+    Borrowed(&'a str),
+    Owned(CompactString),
+}
+
+impl Deref for CowStr<'_> {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        match self {
+            CowStr::Borrowed(s) => s,
+            CowStr::Owned(s) => s.as_str(),
+        }
+    }
+}
+
+fn replace_close_inline_script(raw: &str) -> CowStr {
     let chars = raw.as_bytes();
     let pattern_len = 8; // </script>
 
@@ -96,19 +144,21 @@ fn replace_close_inline_script(raw: &str) -> Cow<str> {
         .peekable();
 
     if matched_indexes.peek().is_none() {
-        return Cow::Borrowed(raw);
+        return CowStr::Borrowed(raw);
     }
 
-    let mut result = String::from(raw);
+    let mut result = CompactString::new(raw);
 
     for (offset, i) in matched_indexes.enumerate() {
         result.insert(i + 1 + offset, '\\');
     }
 
-    Cow::Owned(result)
+    CowStr::Owned(result)
 }
 
-impl<'a, W, S: SourceMapper> Emitter<'a, W, S>
+static NEW_LINE_TPL_REGEX: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"\\n|\n").unwrap());
+
+impl<W, S: SourceMapper> Emitter<'_, W, S>
 where
     W: WriteJs,
     S: SourceMapperExt,
@@ -124,6 +174,7 @@ where
     }
 
     #[emitter]
+    #[tracing::instrument(skip_all)]
     pub fn emit_module(&mut self, node: &Module) -> Result {
         self.emit_leading_comments_of_span(node.span(), false)?;
 
@@ -147,6 +198,7 @@ where
     }
 
     #[emitter]
+    #[tracing::instrument(skip_all)]
     pub fn emit_script(&mut self, node: &Script) -> Result {
         self.emit_leading_comments_of_span(node.span(), false)?;
 
@@ -302,7 +354,7 @@ where
             formatting_space!();
         }
 
-        let mut specifiers = vec![];
+        let mut specifiers = Vec::new();
         let mut emitted_default = false;
         let mut emitted_ns = false;
         for specifier in &n.specifiers {
@@ -467,7 +519,7 @@ where
                 has_namespace_spec: false,
                 namespace_spec: None,
                 has_named_specs: false,
-                named_specs: vec![],
+                named_specs: Vec::new(),
             },
             |mut result, s| match s {
                 ExportSpecifier::Namespace(spec) => {
@@ -576,7 +628,7 @@ where
     }
 
     #[emitter]
-    #[tracing::instrument(skip_all)]
+
     fn emit_lit(&mut self, node: &Lit) -> Result {
         self.emit_leading_comments_of_span(node.span(), false)?;
 
@@ -611,7 +663,7 @@ where
     }
 
     #[emitter]
-    #[tracing::instrument(skip_all)]
+
     fn emit_str_lit(&mut self, node: &Str) -> Result {
         self.wr.commit_pending_semi()?;
 
@@ -622,6 +674,7 @@ where
         if &*node.value == "use strict"
             && node.raw.is_some()
             && node.raw.as_ref().unwrap().contains('\\')
+            && (!self.cfg.inline_script || !node.raw.as_ref().unwrap().contains("script"))
         {
             self.wr
                 .write_str_lit(DUMMY_SP, node.raw.as_ref().unwrap())?;
@@ -635,28 +688,41 @@ where
 
         if !self.cfg.minify {
             if let Some(raw) = &node.raw {
-                if !self.cfg.ascii_only || raw.is_ascii() {
+                if (!self.cfg.ascii_only || raw.is_ascii())
+                    && (!self.cfg.inline_script || !node.raw.as_ref().unwrap().contains("script"))
+                {
                     self.wr.write_str_lit(DUMMY_SP, raw)?;
                     return Ok(());
                 }
             }
         }
 
-        let mut value = get_quoted_utf16(&node.value, self.cfg.ascii_only, target);
+        let (quote_char, mut value) = get_quoted_utf16(&node.value, self.cfg.ascii_only, target);
 
         if self.cfg.inline_script {
-            value = replace_close_inline_script(&value)
-                .replace("\x3c!--", "\\x3c!--")
-                .replace("--\x3e", "--\\x3e");
+            value = CowStr::Owned(
+                replace_close_inline_script(&value)
+                    .replace("\x3c!--", "\\x3c!--")
+                    .replace("--\x3e", "--\\x3e")
+                    .into(),
+            );
         }
 
+        let quote_str = [quote_char.as_byte()];
+        let quote_str = unsafe {
+            // Safety: quote_char is valid ascii
+            str::from_utf8_unchecked(&quote_str)
+        };
+
+        self.wr.write_str(quote_str)?;
         self.wr.write_str_lit(DUMMY_SP, &value)?;
+        self.wr.write_str(quote_str)?;
 
         // srcmap!(node, false);
     }
 
     #[emitter]
-    #[tracing::instrument(skip_all)]
+
     fn emit_num_lit(&mut self, num: &Number) -> Result {
         self.emit_num_lit_internal(num, false)?;
     }
@@ -666,14 +732,14 @@ where
     fn emit_num_lit_internal(
         &mut self,
         num: &Number,
-        detect_dot: bool,
+        mut detect_dot: bool,
     ) -> std::result::Result<bool, io::Error> {
         self.wr.commit_pending_semi()?;
 
         self.emit_leading_comments_of_span(num.span(), false)?;
 
         // Handle infinity
-        if num.value.is_infinite() {
+        if num.value.is_infinite() && num.raw.is_none() {
             if num.value.is_sign_negative() {
                 self.wr.write_str_lit(num.span, "-")?;
             }
@@ -688,8 +754,12 @@ where
         srcmap!(self, num, true);
 
         if self.cfg.minify {
-            value = minify_number(num.value);
-            self.wr.write_str_lit(DUMMY_SP, &value)?;
+            if num.value.is_infinite() && num.raw.is_some() {
+                self.wr.write_str_lit(DUMMY_SP, num.raw.as_ref().unwrap())?;
+            } else {
+                value = minify_number(num.value, &mut detect_dot);
+                self.wr.write_str_lit(DUMMY_SP, &value)?;
+            }
         } else {
             match &num.raw {
                 Some(raw) => {
@@ -697,8 +767,12 @@ where
                         let slice = &raw.as_bytes()[..2];
                         slice == b"0b" || slice == b"0o" || slice == b"0B" || slice == b"0O"
                     } {
-                        value = num.value.to_string();
-                        self.wr.write_str_lit(DUMMY_SP, &value)?;
+                        if num.value.is_infinite() && num.raw.is_some() {
+                            self.wr.write_str_lit(DUMMY_SP, num.raw.as_ref().unwrap())?;
+                        } else {
+                            value = num.value.to_string();
+                            self.wr.write_str_lit(DUMMY_SP, &value)?;
+                        }
                     } else if raw.len() > 2
                         && self.cfg.target < EsVersion::Es2021
                         && raw.contains('_')
@@ -847,7 +921,7 @@ where
     }
 
     #[emitter]
-    #[tracing::instrument(skip_all)]
+
     fn emit_expr(&mut self, node: &Expr) -> Result {
         match node {
             Expr::Array(ref n) => emit!(n),
@@ -1224,6 +1298,13 @@ where
         let need_post_space = if self.cfg.minify {
             if is_kwd_op {
                 node.right.starts_with_alpha_num()
+            } else if node.op == op!("/") {
+                let span = node.right.span();
+
+                span.is_pure()
+                    || self
+                        .comments
+                        .map_or(false, |comments| comments.has_leading(node.right.span().lo))
             } else {
                 require_space_before_rhs(&node.right, &node.op)
             }
@@ -1252,7 +1333,7 @@ where
 
         {
             let mut left = Some(node);
-            let mut lefts = vec![];
+            let mut lefts = Vec::new();
             while let Some(l) = left {
                 lefts.push(l);
 
@@ -1301,6 +1382,11 @@ where
 
         for dec in &node.class.decorators {
             emit!(dec);
+        }
+
+        if node.class.is_abstract {
+            keyword!("abstract");
+            space!();
         }
 
         keyword!("class");
@@ -1358,7 +1444,7 @@ where
     }
 
     #[emitter]
-    #[tracing::instrument(skip_all)]
+
     fn emit_class_member(&mut self, node: &ClassMember) -> Result {
         match *node {
             ClassMember::Constructor(ref n) => emit!(n),
@@ -1560,6 +1646,10 @@ where
             }
         }
 
+        if n.is_optional {
+            punct!("?");
+        }
+
         if let Some(type_params) = &n.function.type_params {
             emit!(type_params);
         }
@@ -1684,9 +1774,7 @@ where
 
         emit!(n.key);
 
-        // emit for a computed property, but not an identifier already marked as
-        // optional
-        if n.is_optional && !n.key.as_ident().map(|i| i.optional).unwrap_or(false) {
+        if n.is_optional {
             punct!("?");
         }
 
@@ -1732,7 +1820,7 @@ where
     }
 
     #[emitter]
-    #[tracing::instrument(skip_all)]
+
     fn emit_class_constructor(&mut self, n: &Constructor) -> Result {
         self.emit_leading_comments_of_span(n.span(), false)?;
 
@@ -1933,16 +2021,36 @@ where
 
     #[emitter]
     fn emit_quasi(&mut self, node: &TplElement) -> Result {
-        srcmap!(node, true);
-
+        let raw = node.raw.replace("\r\n", "\n").replace('\r', "\n");
         if self.cfg.minify || (self.cfg.ascii_only && !node.raw.is_ascii()) {
-            let v = get_template_element_from_raw(&node.raw, self.cfg.ascii_only);
-            self.wr.write_str_lit(DUMMY_SP, &v)?;
-        } else {
-            self.wr.write_str_lit(DUMMY_SP, &node.raw)?;
-        }
+            let v = get_template_element_from_raw(&raw, self.cfg.ascii_only);
+            let span = node.span();
 
-        srcmap!(node, false);
+            let mut last_offset_gen = 0;
+            let mut last_offset_origin = 0;
+            for ((offset_gen, _), mat) in v
+                .match_indices('\n')
+                .zip(NEW_LINE_TPL_REGEX.find_iter(&raw))
+            {
+                // If the string starts with a newline char, then adding a mark is redundant.
+                // This catches both "no newlines" and "newline after several chars".
+                if offset_gen != 0 {
+                    self.wr
+                        .add_srcmap(span.lo + BytePos(last_offset_origin as u32))?;
+                }
+
+                self.wr
+                    .write_str_lit(DUMMY_SP, &v[last_offset_gen..=offset_gen])?;
+                last_offset_gen = offset_gen + 1;
+                last_offset_origin = mat.end();
+            }
+            self.wr
+                .add_srcmap(span.lo + BytePos(last_offset_origin as u32))?;
+            self.wr.write_str_lit(DUMMY_SP, &v[last_offset_gen..])?;
+            self.wr.add_srcmap(span.hi)?;
+        } else {
+            self.wr.write_str_lit(node.span(), &raw)?;
+        }
     }
 
     #[emitter]
@@ -2085,11 +2193,9 @@ where
 
     #[emitter]
     fn emit_expr_or_spread(&mut self, node: &ExprOrSpread) -> Result {
-        if self.comments.is_some() {
-            self.emit_leading_comments_of_span(node.span(), false)?;
-        }
+        if let Some(span) = node.spread {
+            self.emit_leading_comments_of_span(span, false)?;
 
-        if node.spread.is_some() {
             punct!("...");
         }
 
@@ -2306,14 +2412,14 @@ where
         srcmap!(n, true);
 
         punct!("#");
-        emit!(n.id);
+        self.emit_ident_like(n.span, &n.name, false)?;
 
         srcmap!(n, false);
     }
 
     #[emitter]
     fn emit_binding_ident(&mut self, ident: &BindingIdent) -> Result {
-        emit!(ident.id);
+        self.emit_ident_like(ident.span, &ident.sym, ident.optional)?;
 
         if let Some(ty) = &ident.type_ann {
             punct!(":");
@@ -2329,46 +2435,51 @@ where
 
     #[emitter]
     fn emit_ident(&mut self, ident: &Ident) -> Result {
+        self.emit_ident_like(ident.span, &ident.sym, ident.optional)?;
+    }
+
+    #[emitter]
+    fn emit_ident_name(&mut self, ident: &IdentName) -> Result {
+        self.emit_ident_like(ident.span, &ident.sym, false)?;
+    }
+
+    fn emit_ident_like(&mut self, span: Span, sym: &Atom, optional: bool) -> Result {
         // TODO: Use write_symbol when ident is a symbol.
-        self.emit_leading_comments_of_span(ident.span, false)?;
+        self.emit_leading_comments_of_span(span, false)?;
 
         // Source map
         self.wr.commit_pending_semi()?;
 
-        srcmap!(ident, true);
+        srcmap!(self, span, true);
         // TODO: span
 
         if self.cfg.ascii_only {
             if self.wr.can_ignore_invalid_unicodes() {
-                self.wr.write_symbol(
-                    DUMMY_SP,
-                    &get_ascii_only_ident(&ident.sym, false, self.cfg.target),
-                )?;
+                self.wr
+                    .write_symbol(DUMMY_SP, &get_ascii_only_ident(sym, false, self.cfg.target))?;
             } else {
                 self.wr.write_symbol(
                     DUMMY_SP,
-                    &get_ascii_only_ident(
-                        &handle_invalid_unicodes(&ident.sym),
-                        false,
-                        self.cfg.target,
-                    ),
+                    &get_ascii_only_ident(&handle_invalid_unicodes(sym), false, self.cfg.target),
                 )?;
             }
         } else if self.wr.can_ignore_invalid_unicodes() {
-            self.wr.write_symbol(DUMMY_SP, &ident.sym)?;
+            self.wr.write_symbol(DUMMY_SP, sym)?;
         } else {
             self.wr
-                .write_symbol(DUMMY_SP, &handle_invalid_unicodes(&ident.sym))?;
+                .write_symbol(DUMMY_SP, &handle_invalid_unicodes(sym))?;
         }
 
-        if ident.optional {
-            punct!("?");
+        if optional {
+            punct!(self, "?");
         }
 
         // Call emitList directly since it could be an array of
         // TypeParameterDeclarations _or_ type arguments
 
         // emitList(node, node.typeArguments, ListFormat::TypeParameters);
+
+        Ok(())
     }
 
     fn emit_list<N: Node>(
@@ -2704,7 +2815,7 @@ where
 }
 
 /// Patterns
-impl<'a, W, S: SourceMapper> Emitter<'a, W, S>
+impl<W, S: SourceMapper> Emitter<'_, W, S>
 where
     W: WriteJs,
     S: SourceMapperExt,
@@ -2816,11 +2927,14 @@ where
         srcmap!(node, true);
 
         punct!("[");
-        self.emit_list(
-            node.span(),
-            Some(&node.elems),
-            ListFormat::ArrayBindingPatternElements,
-        )?;
+
+        let mut format = ListFormat::ArrayBindingPatternElements;
+
+        if let Some(None) = node.elems.last() {
+            format |= ListFormat::ForceTrailingComma;
+        }
+
+        self.emit_list(node.span(), Some(&node.elems), format)?;
         punct!("]");
         if node.optional {
             punct!("?");
@@ -2929,7 +3043,7 @@ where
 }
 
 /// Statements
-impl<'a, W, S: SourceMapper> Emitter<'a, W, S>
+impl<W, S: SourceMapper> Emitter<'_, W, S>
 where
     W: WriteJs,
     S: SourceMapperExt,
@@ -2962,6 +3076,10 @@ where
                 emit!(e);
                 semi!();
             }
+            Stmt::Decl(e @ Decl::Using(..)) => {
+                emit!(e);
+                semi!();
+            }
             Stmt::Decl(ref e) => emit!(e),
         }
         if self.comments.is_some() {
@@ -2974,7 +3092,7 @@ where
     }
 
     #[emitter]
-    #[tracing::instrument(skip_all)]
+
     fn emit_expr_stmt(&mut self, e: &ExprStmt) -> Result {
         self.emit_leading_comments_of_span(e.span, false)?;
 
@@ -2984,7 +3102,7 @@ where
     }
 
     #[emitter]
-    #[tracing::instrument(skip_all)]
+
     fn emit_block_stmt(&mut self, node: &BlockStmt) -> Result {
         self.emit_block_stmt_inner(node, false)?;
     }
@@ -3409,7 +3527,7 @@ where
     }
 
     #[emitter]
-    #[tracing::instrument(skip_all)]
+
     fn emit_try_stmt(&mut self, n: &TryStmt) -> Result {
         self.emit_leading_comments_of_span(n.span(), false)?;
 
@@ -3587,7 +3705,7 @@ where
     }
 }
 
-impl<'a, W, S: SourceMapper> Emitter<'a, W, S>
+impl<W, S: SourceMapper> Emitter<'_, W, S>
 where
     W: WriteJs,
     S: SourceMapperExt,
@@ -3864,13 +3982,13 @@ fn get_template_element_from_raw(s: &str, ascii_only: bool) -> String {
     buf
 }
 
-fn get_ascii_only_ident(sym: &str, may_need_quote: bool, target: EsVersion) -> Cow<str> {
-    if sym.chars().all(|c| c.is_ascii()) {
-        return Cow::Borrowed(sym);
+fn get_ascii_only_ident(sym: &str, may_need_quote: bool, target: EsVersion) -> CowStr {
+    if sym.is_ascii() {
+        return CowStr::Borrowed(sym);
     }
 
     let mut first = true;
-    let mut buf = String::with_capacity(sym.len() + 8);
+    let mut buf = CompactString::with_capacity(sym.len() + 8);
     let mut iter = sym.chars().peekable();
     let mut need_quote = false;
 
@@ -4032,19 +4150,83 @@ fn get_ascii_only_ident(sym: &str, may_need_quote: bool, target: EsVersion) -> C
     }
 
     if need_quote {
-        Cow::Owned(format!("\"{}\"", buf))
+        CowStr::Owned(format_compact!("\"{}\"", buf))
     } else {
-        Cow::Owned(buf)
+        CowStr::Owned(buf)
     }
 }
 
-fn get_quoted_utf16(v: &str, ascii_only: bool, target: EsVersion) -> String {
-    let mut buf = String::with_capacity(v.len() + 2);
+/// Returns `(quote_char, value)`
+fn get_quoted_utf16(v: &str, ascii_only: bool, target: EsVersion) -> (AsciiChar, CowStr) {
+    // Fast path: If the string is ASCII and doesn't need escaping, we can avoid
+    // allocation
+    if v.is_ascii() {
+        let mut needs_escaping = false;
+        let mut single_quote_count = 0;
+        let mut double_quote_count = 0;
+
+        for &b in v.as_bytes() {
+            match b {
+                b'\'' => single_quote_count += 1,
+                b'"' => double_quote_count += 1,
+                // Control characters and backslash need escaping
+                0..=0x1f | b'\\' => {
+                    needs_escaping = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        if !needs_escaping {
+            let quote_char = if double_quote_count > single_quote_count {
+                AsciiChar::Apostrophe
+            } else {
+                AsciiChar::Quotation
+            };
+
+            // If there are no quotes to escape, we can return the original string
+            if (quote_char == AsciiChar::Apostrophe && single_quote_count == 0)
+                || (quote_char == AsciiChar::Quotation && double_quote_count == 0)
+            {
+                return (quote_char, CowStr::Borrowed(v));
+            }
+        }
+    }
+
+    // Slow path: Original implementation for strings that need processing
+    // Count quotes first to determine which quote character to use
+    let (mut single_quote_count, mut double_quote_count) = (0, 0);
+    for c in v.chars() {
+        match c {
+            '\'' => single_quote_count += 1,
+            '"' => double_quote_count += 1,
+            _ => {}
+        }
+    }
+
+    // Pre-calculate capacity to avoid reallocations
+    let quote_char = if double_quote_count > single_quote_count {
+        AsciiChar::Apostrophe
+    } else {
+        AsciiChar::Quotation
+    };
+    let escape_char = if quote_char == AsciiChar::Apostrophe {
+        AsciiChar::Apostrophe
+    } else {
+        AsciiChar::Quotation
+    };
+    let escape_count = if quote_char == AsciiChar::Apostrophe {
+        single_quote_count
+    } else {
+        double_quote_count
+    };
+
+    // Add 1 for each escaped quote
+    let capacity = v.len() + escape_count;
+    let mut buf = CompactString::with_capacity(capacity);
+
     let mut iter = v.chars().peekable();
-
-    let mut single_quote_count = 0;
-    let mut double_quote_count = 0;
-
     while let Some(c) = iter.next() {
         match c {
             '\x00' => {
@@ -4062,12 +4244,9 @@ fn get_quoted_utf16(v: &str, ascii_only: bool, target: EsVersion) -> String {
             '\t' => buf.push('\t'),
             '\\' => {
                 let next = iter.peek();
-
                 match next {
-                    // TODO fix me - workaround for surrogate pairs
                     Some('u') => {
                         let mut inner_iter = iter.clone();
-
                         inner_iter.next();
 
                         let mut is_curly = false;
@@ -4075,7 +4254,6 @@ fn get_quoted_utf16(v: &str, ascii_only: bool, target: EsVersion) -> String {
 
                         if next == Some(&'{') {
                             is_curly = true;
-
                             inner_iter.next();
                             next = inner_iter.peek();
                         } else if next != Some(&'D') && next != Some(&'d') {
@@ -4083,8 +4261,7 @@ fn get_quoted_utf16(v: &str, ascii_only: bool, target: EsVersion) -> String {
                         }
 
                         if let Some(c @ 'D' | c @ 'd') = next {
-                            let mut inner_buf = String::new();
-
+                            let mut inner_buf = String::with_capacity(8);
                             inner_buf.push('\\');
                             inner_buf.push('u');
 
@@ -4093,21 +4270,17 @@ fn get_quoted_utf16(v: &str, ascii_only: bool, target: EsVersion) -> String {
                             }
 
                             inner_buf.push(*c);
-
                             inner_iter.next();
 
                             let mut is_valid = true;
-
                             for _ in 0..3 {
-                                let c = inner_iter.next();
-
-                                match c {
-                                    Some('0'..='9') | Some('a'..='f') | Some('A'..='F') => {
-                                        inner_buf.push(c.unwrap());
+                                match inner_iter.next() {
+                                    Some(c @ '0'..='9') | Some(c @ 'a'..='f')
+                                    | Some(c @ 'A'..='F') => {
+                                        inner_buf.push(c);
                                     }
                                     _ => {
                                         is_valid = false;
-
                                         break;
                                     }
                                 }
@@ -4125,29 +4298,23 @@ fn get_quoted_utf16(v: &str, ascii_only: bool, target: EsVersion) -> String {
 
                             if is_valid {
                                 let val_str = &inner_buf[range];
-
-                                let v = u32::from_str_radix(val_str, 16).unwrap_or_else(|err| {
-                                    unreachable!(
-                                        "failed to parse {} as a hex value: {:?}",
-                                        val_str, err
-                                    )
-                                });
-
-                                if v > 0xffff {
-                                    buf.push_str(&inner_buf);
-
-                                    let end = if is_curly { 7 } else { 5 };
-
-                                    for _ in 0..end {
-                                        iter.next();
+                                if let Ok(v) = u32::from_str_radix(val_str, 16) {
+                                    if v > 0xffff {
+                                        buf.push_str(&inner_buf);
+                                        let end = if is_curly { 7 } else { 5 };
+                                        for _ in 0..end {
+                                            iter.next();
+                                        }
+                                    } else if (0xd800..=0xdfff).contains(&v) {
+                                        buf.push('\\');
+                                    } else {
+                                        buf.push_str("\\\\");
                                     }
-                                } else if (0xd800..=0xdfff).contains(&v) {
-                                    buf.push('\\');
                                 } else {
                                     buf.push_str("\\\\");
                                 }
                             } else {
-                                buf.push_str("\\\\")
+                                buf.push_str("\\\\");
                             }
                         } else if is_curly {
                             buf.push_str("\\\\");
@@ -4155,66 +4322,48 @@ fn get_quoted_utf16(v: &str, ascii_only: bool, target: EsVersion) -> String {
                             buf.push('\\');
                         }
                     }
-                    _ => {
-                        buf.push_str("\\\\");
-                    }
+                    _ => buf.push_str("\\\\"),
                 }
             }
-            '\'' => {
-                single_quote_count += 1;
-                buf.push('\'');
-            }
-            '"' => {
-                double_quote_count += 1;
-                buf.push('"');
-            }
-            '\x01'..='\x0f' => {
-                let _ = write!(buf, "\\x0{:x}", c as u8);
-            }
-            '\x10'..='\x1f' => {
-                let _ = write!(buf, "\\x{:x}", c as u8);
-            }
-            '\x20'..='\x7e' => {
+            c if c == escape_char => {
+                buf.push('\\');
                 buf.push(c);
             }
+            '\x01'..='\x0f' => {
+                buf.push_str("\\x0");
+                write!(&mut buf, "{:x}", c as u8).unwrap();
+            }
+            '\x10'..='\x1f' => {
+                buf.push_str("\\x");
+                write!(&mut buf, "{:x}", c as u8).unwrap();
+            }
+            '\x20'..='\x7e' => buf.push(c),
             '\u{7f}'..='\u{ff}' => {
                 if ascii_only || target <= EsVersion::Es5 {
-                    let _ = write!(buf, "\\x{:x}", c as u8);
+                    buf.push_str("\\x");
+                    write!(&mut buf, "{:x}", c as u8).unwrap();
                 } else {
                     buf.push(c);
                 }
             }
-            '\u{2028}' => {
-                buf.push_str("\\u2028");
-            }
-            '\u{2029}' => {
-                buf.push_str("\\u2029");
-            }
-            '\u{FEFF}' => {
-                buf.push_str("\\uFEFF");
-            }
-            _ => {
+            '\u{2028}' => buf.push_str("\\u2028"),
+            '\u{2029}' => buf.push_str("\\u2029"),
+            '\u{FEFF}' => buf.push_str("\\uFEFF"),
+            c => {
                 if c.is_ascii() {
                     buf.push(c);
                 } else if c > '\u{FFFF}' {
-                    // if we've got this far the char isn't reserved and if the callee has specified
-                    // we should output unicode for non-ascii chars then we have
-                    // to make sure we output unicode that is safe for the target
-                    // Es5 does not support code point escapes and so surrograte formula must be
-                    // used
                     if target <= EsVersion::Es5 {
-                        // https://mathiasbynens.be/notes/javascript-encoding#surrogate-formulae
                         let h = ((c as u32 - 0x10000) / 0x400) + 0xd800;
                         let l = (c as u32 - 0x10000) % 0x400 + 0xdc00;
-
-                        let _ = write!(buf, "\\u{:04X}\\u{:04X}", h, l);
+                        write!(&mut buf, "\\u{:04X}\\u{:04X}", h, l).unwrap();
                     } else if ascii_only {
-                        let _ = write!(buf, "\\u{{{:04X}}}", c as u32);
+                        write!(&mut buf, "\\u{{{:04X}}}", c as u32).unwrap();
                     } else {
                         buf.push(c);
                     }
                 } else if ascii_only {
-                    let _ = write!(buf, "\\u{:04X}", c as u16);
+                    write!(&mut buf, "\\u{:04X}", c as u16).unwrap();
                 } else {
                     buf.push(c);
                 }
@@ -4222,11 +4371,7 @@ fn get_quoted_utf16(v: &str, ascii_only: bool, target: EsVersion) -> String {
         }
     }
 
-    if double_quote_count > single_quote_count {
-        format!("'{}'", buf.replace('\'', "\\'"))
-    } else {
-        format!("\"{}\"", buf.replace('"', "\\\""))
-    }
+    (quote_char, CowStr::Owned(buf))
 }
 
 fn handle_invalid_unicodes(s: &str) -> Cow<str> {
@@ -4277,69 +4422,76 @@ fn is_empty_comments(span: &Span, comments: &Option<&dyn Comments>) -> bool {
     span.is_dummy() || comments.map_or(true, |c| !c.has_leading(span.span_hi() - BytePos(1)))
 }
 
-fn minify_number(num: f64) -> String {
-    let mut printed = num.to_string();
+fn minify_number(num: f64, detect_dot: &mut bool) -> String {
+    // ddddd -> 0xhhhh
+    // len(0xhhhh) == len(ddddd)
+    // 10000000 <= num <= 0xffffff
+    'hex: {
+        if num.fract() == 0.0 && num.abs() <= u64::MAX as f64 {
+            let int = num.abs() as u64;
 
-    let mut original = printed.clone();
-
-    if num.fract() == 0.0 && (i64::MIN as f64) <= num && num <= (i64::MAX as f64) {
-        let hex = format!(
-            "{}{:#x}",
-            if num.is_sign_negative() { "-" } else { "" },
-            num as i64
-        );
-
-        if hex.len() < printed.len() {
-            printed = hex;
-        }
-    }
-
-    if original.starts_with("0.") {
-        original.replace_range(0..1, "");
-    }
-
-    if original.starts_with("-0.") {
-        original.replace_range(1..2, "");
-    }
-
-    if original.starts_with(".000") {
-        let mut cnt = 3;
-
-        for &v in original.as_bytes().iter().skip(4) {
-            if v == b'0' {
-                cnt += 1;
-            } else {
-                break;
+            if int < 10000000 {
+                break 'hex;
             }
-        }
 
-        original.replace_range(0..cnt + 1, "");
-
-        let remain_len = original.len();
-
-        original.push_str("e-");
-        original.push_str(&(remain_len + cnt).to_string());
-    } else if original.ends_with("000") {
-        let mut cnt = 3;
-
-        for &v in original.as_bytes().iter().rev().skip(3) {
-            if v == b'0' {
-                cnt += 1;
-            } else {
-                break;
+            // use scientific notation
+            if int % 1000 == 0 {
+                break 'hex;
             }
+
+            *detect_dot = false;
+            return format!(
+                "{}{:#x}",
+                if num.is_sign_negative() { "-" } else { "" },
+                int
+            );
         }
-
-        original.truncate(original.len() - cnt);
-        original.push('e');
-        original.push_str(&cnt.to_string());
     }
 
-    if original.len() < printed.len() {
-        printed = original;
+    let mut num = num.to_string();
+
+    if num.contains(".") {
+        *detect_dot = false;
     }
 
-    printed
+    if let Some(num) = num.strip_prefix("0.") {
+        let cnt = clz(num);
+        if cnt > 2 {
+            return format!("{}e-{}", &num[cnt..], num.len());
+        }
+        return format!(".{}", num);
+    }
+
+    if let Some(num) = num.strip_prefix("-0.") {
+        let cnt = clz(num);
+        if cnt > 2 {
+            return format!("-{}e-{}", &num[cnt..], num.len());
+        }
+        return format!("-.{}", num);
+    }
+
+    if num.ends_with("000") {
+        *detect_dot = false;
+
+        let cnt = num
+            .as_bytes()
+            .iter()
+            .rev()
+            .skip(3)
+            .take_while(|&&c| c == b'0')
+            .count()
+            + 3;
+
+        num.truncate(num.len() - cnt);
+        num.push('e');
+        num.push_str(&cnt.to_string());
+    }
+
+    num
+}
+
+fn clz(s: &str) -> usize {
+    s.as_bytes().iter().take_while(|&&c| c == b'0').count()
 }
 
 fn span_has_leading_comment(cmt: &dyn Comments, span: Span) -> bool {

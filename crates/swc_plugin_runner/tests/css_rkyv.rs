@@ -7,13 +7,11 @@ use std::{
 };
 
 use anyhow::{anyhow, Error};
+use rustc_hash::FxHashMap;
 use serde_json::json;
 #[cfg(feature = "__rkyv")]
 use swc_common::plugin::serialized::PluginSerializedBytes;
-use swc_common::{
-    collections::AHashMap, plugin::metadata::TransformPluginMetadataContext, sync::Lazy, FileName,
-    Mark,
-};
+use swc_common::{plugin::metadata::TransformPluginMetadataContext, sync::Lazy, FileName, Mark};
 use testing::CARGO_TARGET_DIR;
 use tracing::info;
 
@@ -82,16 +80,16 @@ fn invoke(input: PathBuf) {
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         // run single plugin
         testing::run_test(false, |cm, _handler| {
-            let fm = cm.new_source_file(FileName::Anon, "console.log(foo)".into());
+            let fm = cm.new_source_file(FileName::Anon.into(), "console.log(foo)".into());
 
             let parsed: Stylesheet =
-                swc_css_parser::parse_file(&fm, None, Default::default(), &mut vec![]).unwrap();
+                swc_css_parser::parse_file(&fm, None, Default::default(), &mut Vec::new()).unwrap();
 
             let program = PluginSerializedBytes::try_serialize(
                 &swc_common::plugin::serialized::VersionedSerializable::new(parsed.clone()),
             )
             .expect("Should serializable");
-            let experimental_metadata: AHashMap<String, String> = [
+            let experimental_metadata: FxHashMap<String, String> = [
                 (
                     "TestExperimental".to_string(),
                     "ExperimentalValue".to_string(),
@@ -133,17 +131,17 @@ fn invoke(input: PathBuf) {
 
         // Run multiple plugins.
         testing::run_test(false, |cm, _handler| {
-            let fm = cm.new_source_file(FileName::Anon, "console.log(foo)".into());
+            let fm = cm.new_source_file(FileName::Anon.into(), "console.log(foo)".into());
 
             let parsed: Stylesheet =
-                swc_css_parser::parse_file(&fm, None, Default::default(), &mut vec![]).unwrap();
+                swc_css_parser::parse_file(&fm, None, Default::default(), &mut Vec::new()).unwrap();
 
             let mut serialized_program = PluginSerializedBytes::try_serialize(
                 &swc_common::plugin::serialized::VersionedSerializable::new(parsed.clone()),
             )
             .expect("Should serializable");
 
-            let experimental_metadata: AHashMap<String, String> = [
+            let experimental_metadata: FxHashMap<String, String> = [
                 (
                     "TestExperimental".to_string(),
                     "ExperimentalValue".to_string(),

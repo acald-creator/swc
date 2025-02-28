@@ -1,5 +1,5 @@
 use rustc_hash::FxHashMap;
-use swc_atoms::JsWord;
+use swc_atoms::Atom;
 use swc_common::{util::take::Take, Span};
 use swc_css_ast::{
     ComplexSelector, ComplexSelectorChildren, ComponentValue, Declaration, DeclarationName,
@@ -18,10 +18,10 @@ pub mod imports;
 /// too restricted and `Box<Fn() -> String` is (needlessly) slow.
 pub trait TransformConfig {
     /// Creates a class name for the given `local_name`.
-    fn new_name_for(&self, local: &JsWord) -> JsWord;
+    fn new_name_for(&self, local: &Atom) -> Atom;
 
     // /// Used for `@value` imports.
-    // fn get_value(&self, import_source: &str, value_name: &JsWord) ->
+    // fn get_value(&self, import_source: &str, value_name: &Atom) ->
     // ComponentValue;
 }
 
@@ -38,14 +38,14 @@ pub enum CssClassName {
         /// The exported class name. This is the value specified by the user.
         name: Ident,
         /// The module specifier.
-        from: JsWord,
+        from: Atom,
     },
 }
 
 #[derive(Debug, Clone)]
 pub struct TransformResult {
     /// A map of js class name to css class names.
-    pub renamed: FxHashMap<JsWord, Vec<CssClassName>>,
+    pub renamed: FxHashMap<Atom, Vec<CssClassName>>,
 }
 
 /// Returns a map from local name to exported name.
@@ -59,6 +59,50 @@ pub fn compile<'a>(ss: &mut Stylesheet, config: impl 'a + TransformConfig) -> Tr
     };
 
     ss.visit_mut_with(&mut compiler);
+
+    fn add(result: &mut TransformResult, data: &Data, key: &Atom, composes: &[CssClassName]) {
+        let mut extra_classes = Vec::new();
+        {
+            let class_names = result.renamed.entry(key.clone()).or_default();
+
+            class_names.extend(composes.iter().cloned());
+        }
+
+        for composed_class_name in composes.iter() {
+            if let CssClassName::Local { name } = composed_class_name {
+                if let Some(original_class_name) = data.renamed_to_orig.get(&name.value) {
+                    extra_classes.extend(
+                        result
+                            .renamed
+                            .entry(original_class_name.clone())
+                            .or_default()
+                            .split_at(1)
+                            .1
+                            .to_vec(),
+                    );
+                }
+            }
+        }
+
+        {
+            let class_names = result.renamed.entry(key.clone()).or_default();
+
+            class_names.extend(extra_classes);
+        }
+    }
+
+    let composes = compiler.data.composes_inherit.take();
+
+    for (key, composes) in &composes {
+        add(&mut compiler.result, &compiler.data, key, composes);
+    }
+    for (key, composes) in &composes {
+        add(&mut compiler.result, &compiler.data, key, composes);
+    }
+    compiler.result.renamed.iter_mut().for_each(|(_, v)| {
+        v.sort();
+        v.dedup();
+    });
 
     compiler.result
 }
@@ -76,9 +120,10 @@ where
 struct Data {
     /// Context for `composes`
     composes_for_current: Option<Vec<CssClassName>>,
+    composes_inherit: Vec<(Atom, Vec<CssClassName>)>,
 
-    renamed_to_orig: FxHashMap<JsWord, JsWord>,
-    orig_to_renamed: FxHashMap<JsWord, JsWord>,
+    renamed_to_orig: FxHashMap<Atom, Atom>,
+    orig_to_renamed: FxHashMap<Atom, Atom>,
 
     is_global_mode: bool,
     is_in_local_pseudo_class: bool,
@@ -214,27 +259,7 @@ where
                                     .cloned();
 
                                 if let Some(key) = key {
-                                    let mut renamed = self.result.renamed.clone();
-                                    let class_names = self.result.renamed.entry(key).or_default();
-
-                                    class_names.extend(composes.clone());
-
-                                    for composed_class_name in composes.iter() {
-                                        if let CssClassName::Local { name } = composed_class_name {
-                                            if let Some(original_class_name) =
-                                                self.data.renamed_to_orig.get(&name.value)
-                                            {
-                                                class_names.extend(
-                                                    renamed
-                                                        .entry(original_class_name.clone())
-                                                        .or_default()
-                                                        .split_at(1)
-                                                        .1
-                                                        .to_vec(),
-                                                );
-                                            }
-                                        }
-                                    }
+                                    self.data.composes_inherit.push((key, composes.clone()));
                                 }
                             }
                         }
@@ -592,9 +617,9 @@ fn rename<C>(
     span: Span,
     config: &mut C,
     result: &mut TransformResult,
-    orig_to_renamed: &mut FxHashMap<JsWord, JsWord>,
-    renamed_to_orig: &mut FxHashMap<JsWord, JsWord>,
-    name: &mut JsWord,
+    orig_to_renamed: &mut FxHashMap<Atom, Atom>,
+    renamed_to_orig: &mut FxHashMap<Atom, Atom>,
+    name: &mut Atom,
 ) where
     C: TransformConfig,
 {
@@ -629,8 +654,8 @@ fn rename<C>(
 fn process_local<C>(
     config: &mut C,
     result: &mut TransformResult,
-    orig_to_renamed: &mut FxHashMap<JsWord, JsWord>,
-    renamed_to_orig: &mut FxHashMap<JsWord, JsWord>,
+    orig_to_renamed: &mut FxHashMap<Atom, Atom>,
+    renamed_to_orig: &mut FxHashMap<Atom, Atom>,
     sel: &mut SubclassSelector,
 ) where
     C: TransformConfig,
@@ -679,9 +704,8 @@ fn prepend_left_subclass_selectors(
     {
         c.subclass_selectors.splice(0..0, sels.drain(..sel_index));
 
-        if sels.len() > sel_index {
-            c.subclass_selectors
-                .extend(sels[..sel_index + 1].iter().cloned());
+        if !sels.is_empty() {
+            c.subclass_selectors.extend(sels[..].iter().cloned());
         }
 
         sel_index = 0;

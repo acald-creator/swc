@@ -8,19 +8,20 @@ use napi::{
     bindgen_prelude::{AbortSignal, AsyncTask, Buffer},
     Env, Status, Task,
 };
+use rustc_hash::FxHashMap;
 use serde::Deserialize;
 use swc_core::{
-    atoms::JsWord,
+    atoms::Atom,
     base::{
         config::SourceMapsConfig,
         resolver::{environment_resolver, paths_resolver},
         Compiler, PrintArgs, TransformOutput,
     },
     bundler::{BundleKind, Bundler, Load, ModuleRecord, Resolve},
-    common::{collections::AHashMap, Globals, Span, GLOBALS},
+    common::{Globals, Span, GLOBALS},
     ecma::{
         ast::{
-            Bool, Expr, Ident, KeyValueProp, Lit, MemberExpr, MemberProp, MetaPropExpr,
+            Bool, Expr, IdentName, KeyValueProp, Lit, MemberExpr, MemberProp, MetaPropExpr,
             MetaPropKind, PropName, Str,
         },
         loader::{TargetEnv, NODE_BUILTINS},
@@ -52,18 +53,18 @@ pub(crate) struct BundleTask {
 #[cfg(feature = "swc_v1")]
 #[napi]
 impl Task for BundleTask {
-    type JsValue = AHashMap<String, TransformOutput>;
-    type Output = AHashMap<String, TransformOutput>;
+    type JsValue = FxHashMap<String, TransformOutput>;
+    type Output = FxHashMap<String, TransformOutput>;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         let builtins = if let TargetEnv::Node = self.config.static_items.config.target {
             NODE_BUILTINS
                 .iter()
                 .copied()
-                .map(JsWord::from)
+                .map(Atom::from)
                 .collect::<Vec<_>>()
         } else {
-            vec![]
+            Vec::new()
         };
 
         // Defaults to es3
@@ -172,8 +173,8 @@ impl Task for BundleTask {
 
 #[cfg(feature = "swc_v2")]
 impl Task for BundleTask {
-    type JsValue = AHashMap<String, TransformOutput>;
-    type Output = AHashMap<String, TransformOutput>;
+    type JsValue = FxHashMap<String, TransformOutput>;
+    type Output = FxHashMap<String, TransformOutput>;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         todo!()
@@ -275,7 +276,7 @@ impl swc_core::bundler::Hook for Hook {
 
         Ok(vec![
             KeyValueProp {
-                key: PropName::Ident(Ident::new("url".into(), span)),
+                key: PropName::Ident(IdentName::new("url".into(), span)),
                 value: Box::new(Expr::Lit(Lit::Str(Str {
                     span,
                     raw: None,
@@ -283,7 +284,7 @@ impl swc_core::bundler::Hook for Hook {
                 }))),
             },
             KeyValueProp {
-                key: PropName::Ident(Ident::new("main".into(), span)),
+                key: PropName::Ident(IdentName::new("main".into(), span)),
                 value: Box::new(if module_record.is_entry {
                     Expr::Member(MemberExpr {
                         span,
@@ -291,7 +292,7 @@ impl swc_core::bundler::Hook for Hook {
                             span,
                             kind: MetaPropKind::ImportMeta,
                         })),
-                        prop: MemberProp::Ident(Ident::new("main".into(), span)),
+                        prop: MemberProp::Ident(IdentName::new("main".into(), span)),
                     })
                 } else {
                     Expr::Lit(Lit::Bool(Bool { span, value: false }))

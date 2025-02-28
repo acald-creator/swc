@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use swc_atoms::JsWord;
+use swc_atoms::Atom;
 use swc_common::ast_serde;
 
 use crate::{
@@ -288,8 +288,6 @@ pub struct TSPropertySignature {
     pub key: Box<Expression>,
     #[serde(default)]
     pub type_annotation: Option<Box<TSTypeAnnotation>>,
-    #[serde(default)]
-    pub initializer: Option<Box<Expression>>,
     #[serde(default)]
     pub computed: Option<bool>,
     #[serde(default)]
@@ -642,7 +640,7 @@ pub struct TSTypeOperator {
     pub base: BaseNode,
     pub type_annotation: Box<TSType>,
     #[serde(default)]
-    pub operator: JsWord,
+    pub operator: Atom,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -914,7 +912,7 @@ pub struct TSTypeParameter {
     #[serde(default)]
     pub default: Option<Box<TSType>>,
     #[serde(default)]
-    pub name: JsWord,
+    pub name: Atom,
 
     #[serde(default, rename = "in")]
     pub is_in: bool,

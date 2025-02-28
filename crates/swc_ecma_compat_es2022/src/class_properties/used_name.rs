@@ -1,10 +1,10 @@
-use swc_atoms::JsWord;
+use swc_atoms::Atom;
 use swc_ecma_ast::*;
 use swc_ecma_visit::{noop_visit_type, Visit, VisitWith};
 use swc_trace_macro::swc_trace;
 
 pub(super) struct UsedNameCollector<'a> {
-    pub used_names: &'a mut Vec<JsWord>,
+    pub used_names: &'a mut Vec<Atom>,
 }
 
 macro_rules! noop {
@@ -15,8 +15,8 @@ macro_rules! noop {
 }
 
 #[swc_trace]
-impl<'a> Visit for UsedNameCollector<'a> {
-    noop_visit_type!();
+impl Visit for UsedNameCollector<'_> {
+    noop_visit_type!(fail);
 
     noop!(visit_arrow_expr, ArrowExpr);
 

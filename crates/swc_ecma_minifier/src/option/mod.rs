@@ -1,10 +1,14 @@
 #![cfg_attr(not(feature = "extra-serde"), allow(unused))]
 
+use std::sync::Arc;
+
+use parking_lot::RwLock;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use swc_atoms::JsWord;
-use swc_common::{collections::AHashMap, Mark};
+use swc_atoms::Atom;
+use swc_common::Mark;
 use swc_config::{merge::Merge, CachedRegex};
-use swc_ecma_ast::{EsVersion, Expr};
+use swc_ecma_ast::{EsVersion, Expr, Id};
 
 /// Implement default using serde.
 macro_rules! impl_default {
@@ -20,13 +24,14 @@ macro_rules! impl_default {
 pub mod terser;
 
 /// This is not serializable.
-#[derive(Debug)]
 pub struct ExtraOptions {
     /// It should be the [Mark] used for `resolver`.
     pub unresolved_mark: Mark,
 
     /// It should be the [Mark] used for `resolver`.
     pub top_level_mark: Mark,
+
+    pub mangle_name_cache: Option<Arc<dyn MangleCache>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -80,7 +85,7 @@ pub struct MangleOptions {
     pub safari10: bool,
 
     #[serde(default, alias = "reserved")]
-    pub reserved: Vec<JsWord>,
+    pub reserved: Vec<Atom>,
 
     /// mangle names visible in scopes where eval or with are used
     #[serde(default)]
@@ -91,7 +96,7 @@ pub struct MangleOptions {
 #[serde(rename_all = "camelCase")]
 pub struct ManglePropertiesOptions {
     #[serde(default, alias = "reserved")]
-    pub reserved: Vec<JsWord>,
+    pub reserved: Vec<Atom>,
     #[serde(default, alias = "undeclared")]
     pub undeclared: Option<bool>,
     #[serde(default)]
@@ -105,7 +110,7 @@ pub enum PureGetterOption {
     Bool(bool),
     #[serde(rename = "strict")]
     Strict,
-    Str(Vec<JsWord>),
+    Str(Vec<Atom>),
 }
 
 impl Default for PureGetterOption {
@@ -183,7 +188,7 @@ pub struct CompressOptions {
     /// to remove spans.
     #[cfg_attr(feature = "extra-serde", serde(skip))]
     #[cfg_attr(feature = "extra-serde", serde(alias = "global_defs"))]
-    pub global_defs: AHashMap<Box<Expr>, Box<Expr>>,
+    pub global_defs: FxHashMap<Box<Expr>, Box<Expr>>,
 
     #[cfg_attr(feature = "extra-serde", serde(default))]
     #[cfg_attr(feature = "extra-serde", serde(alias = "hoist_funs"))]
@@ -287,7 +292,7 @@ pub struct CompressOptions {
     /// Top level symbols to retain.
     #[cfg_attr(feature = "extra-serde", serde(default))]
     #[cfg_attr(feature = "extra-serde", serde(alias = "top_retain"))]
-    pub top_retain: Vec<JsWord>,
+    pub top_retain: Vec<Atom>,
 
     #[cfg_attr(feature = "extra-serde", serde(default))]
     #[cfg_attr(feature = "extra-serde", serde(alias = "toplevel"))]
@@ -362,7 +367,7 @@ const fn true_by_default() -> bool {
 }
 
 const fn default_passes() -> usize {
-    3
+    2
 }
 
 const fn three_by_default() -> u8 {
@@ -434,5 +439,43 @@ impl Default for CompressOptions {
             const_to_let: true,
             pristine_globals: true,
         }
+    }
+}
+
+pub trait MangleCache: Send + Sync {
+    fn vars_cache(&self, op: &mut dyn FnMut(&FxHashMap<Id, Atom>));
+
+    fn props_cache(&self, op: &mut dyn FnMut(&FxHashMap<Atom, Atom>));
+
+    fn update_vars_cache(&self, new_data: &FxHashMap<Id, Atom>);
+
+    fn update_props_cache(&self, new_data: &FxHashMap<Atom, Atom>);
+}
+
+#[derive(Debug, Default)]
+pub struct SimpleMangleCache {
+    pub vars: RwLock<FxHashMap<Id, Atom>>,
+    pub props: RwLock<FxHashMap<Atom, Atom>>,
+}
+
+impl MangleCache for SimpleMangleCache {
+    fn vars_cache(&self, op: &mut dyn FnMut(&FxHashMap<Id, Atom>)) {
+        let vars = self.vars.read();
+        op(&vars);
+    }
+
+    fn props_cache(&self, op: &mut dyn FnMut(&FxHashMap<Atom, Atom>)) {
+        let props = self.props.read();
+        op(&props);
+    }
+
+    fn update_vars_cache(&self, new_data: &FxHashMap<Id, Atom>) {
+        let mut vars = self.vars.write();
+        vars.extend(new_data.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+
+    fn update_props_cache(&self, new_data: &FxHashMap<Atom, Atom>) {
+        let mut props = self.props.write();
+        props.extend(new_data.iter().map(|(k, v)| (k.clone(), v.clone())));
     }
 }

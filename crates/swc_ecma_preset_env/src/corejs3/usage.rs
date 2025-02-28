@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use indexmap::IndexSet;
 use preset_env_base::version::{should_enable, Version};
-use swc_atoms::{js_word, JsWord};
-use swc_common::{collections::ARandomState, DUMMY_SP};
+use rustc_hash::FxBuildHasher;
+use swc_atoms::Atom;
 use swc_ecma_ast::*;
 use swc_ecma_visit::{noop_visit_type, Visit, VisitWith};
 
@@ -18,14 +20,14 @@ use crate::{
 pub(crate) struct UsageVisitor {
     shipped_proposals: bool,
     is_any_target: bool,
-    target: Versions,
+    target: Arc<Versions>,
     corejs_version: Version,
-    pub required: IndexSet<&'static str, ARandomState>,
+    pub required: IndexSet<&'static str, FxBuildHasher>,
 }
 
 impl UsageVisitor {
-    pub fn new(target: Versions, shipped_proposals: bool, corejs_version: Version) -> Self {
-        //        let mut v = Self { required: vec![] };
+    pub fn new(target: Arc<Versions>, shipped_proposals: bool, corejs_version: Version) -> Self {
+        //        let mut v = Self { required: Vec::new() };
         //
         //
         //        let is_web_target = target
@@ -80,7 +82,7 @@ impl UsageVisitor {
 
             if !*is_any_target {
                 if let Some(feature) = feature {
-                    if !should_enable(*target, *feature, true) {
+                    if !should_enable(target, feature, true) {
                         return false;
                     }
                 }
@@ -100,7 +102,7 @@ impl UsageVisitor {
         }
     }
 
-    fn add_property_deps(&mut self, obj: &Expr, prop: &JsWord) {
+    fn add_property_deps(&mut self, obj: &Expr, prop: &Atom) {
         let obj = match obj {
             Expr::Ident(i) => &i.sym,
             _ => {
@@ -112,7 +114,7 @@ impl UsageVisitor {
         self.add_property_deps_inner(Some(obj), prop)
     }
 
-    fn add_property_deps_inner(&mut self, obj: Option<&JsWord>, prop: &JsWord) {
+    fn add_property_deps_inner(&mut self, obj: Option<&Atom>, prop: &Atom) {
         if let Some(obj) = obj {
             if POSSIBLE_GLOBAL_OBJECTS.contains(&&**obj) {
                 self.add_builtin(prop);
@@ -154,7 +156,7 @@ impl UsageVisitor {
 }
 
 impl Visit for UsageVisitor {
-    noop_visit_type!();
+    noop_visit_type!(fail);
 
     /// `[a, b] = c`
     fn visit_array_pat(&mut self, p: &ArrayPat) {
@@ -254,7 +256,7 @@ impl Visit for UsageVisitor {
                 self.visit_object_pat_props(init, &o.props)
             }
         } else if let Pat::Object(ref o) = d.name {
-            self.visit_object_pat_props(&Expr::Ident(Ident::new(js_word!(""), DUMMY_SP)), &o.props)
+            self.visit_object_pat_props(&Ident::default().into(), &o.props)
         }
     }
 

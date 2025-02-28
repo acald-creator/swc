@@ -6,7 +6,7 @@
 pub use std::fmt::Result;
 use std::{borrow::Cow, iter::Peekable, str::Chars};
 
-use swc_atoms::JsWord;
+use swc_atoms::Atom;
 use swc_common::Spanned;
 use swc_html_ast::*;
 use swc_html_codegen_macros::emitter;
@@ -620,8 +620,9 @@ where
                         None => true,
                         _ => false,
                     },
-                    // 	The closing tag can be omitted if it is immediately followed by a <rb>, <rtc>
-                    // or <rt> element opening tag or by its parent closing tag.
+                    // 	The closing tag can be omitted if it is immediately followed by a <rb>,
+                    // <rtc> or <rt> element opening tag or by its parent
+                    // closing tag.
                     "rtc" => match next {
                         Some(Child::Element(Element {
                             namespace,
@@ -976,9 +977,9 @@ fn minify_attribute_value(value: &str, quotes: bool) -> (Cow<'_, str>, Option<ch
     }
 
     if dq > sq {
-        return (Cow::Owned(minified.replace('\'', "&apos;")), Some('\''));
+        (Cow::Owned(minified.replace('\'', "&apos;")), Some('\''))
     } else {
-        return (Cow::Owned(minified.replace('"', "&quot;")), Some('"'));
+        (Cow::Owned(minified.replace('"', "&quot;")), Some('"'))
     }
 }
 
@@ -1163,7 +1164,7 @@ fn escape_string(value: &str, is_attribute_mode: bool) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
-fn is_html_tag_name(namespace: Namespace, tag_name: &JsWord) -> bool {
+fn is_html_tag_name(namespace: Namespace, tag_name: &Atom) -> bool {
     if namespace != Namespace::HTML {
         return false;
     }

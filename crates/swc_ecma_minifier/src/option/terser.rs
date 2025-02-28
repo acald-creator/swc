@@ -1,9 +1,10 @@
 //! Compatibility for terser config.
 
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use swc_atoms::JsWord;
-use swc_common::{collections::AHashMap, sync::Lrc, FileName, SourceMap, DUMMY_SP};
+use swc_atoms::Atom;
+use swc_common::{sync::Lrc, FileName, SourceMap, DUMMY_SP};
 use swc_ecma_ast::*;
 use swc_ecma_parser::parse_file_as_expr;
 use swc_ecma_utils::drop_span;
@@ -65,7 +66,7 @@ pub enum TerserSequenceOptions {
 #[serde(untagged)]
 pub enum TerserTopRetainOption {
     Str(String),
-    Seq(Vec<JsWord>),
+    Seq(Vec<Atom>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,7 +121,7 @@ pub struct TerserCompressorOptions {
     pub expression: bool,
 
     #[serde(default)]
-    pub global_defs: AHashMap<JsWord, Value>,
+    pub global_defs: FxHashMap<Atom, Value>,
 
     #[serde(default)]
     pub hoist_funs: bool,
@@ -267,14 +268,14 @@ impl TerserCompressorOptions {
                 .into_iter()
                 .map(|(k, v)| {
                     let parse = |input: String| {
-                        let fm = cm.new_source_file(FileName::Anon, input);
+                        let fm = cm.new_source_file(FileName::Anon.into(), input);
 
                         parse_file_as_expr(
                             &fm,
                             Default::default(),
                             Default::default(),
                             None,
-                            &mut vec![],
+                            &mut Vec::new(),
                         )
                         .map(drop_span)
                         .unwrap_or_else(|err| {
@@ -381,14 +382,14 @@ impl TerserCompressorOptions {
                 .pure_funcs
                 .into_iter()
                 .map(|input| {
-                    let fm = cm.new_source_file(FileName::Anon, input);
+                    let fm = cm.new_source_file(FileName::Anon.into(), input);
 
                     parse_file_as_expr(
                         &fm,
                         Default::default(),
                         Default::default(),
                         None,
-                        &mut vec![],
+                        &mut Vec::new(),
                     )
                     .map(drop_span)
                     .unwrap_or_else(|err| {
@@ -441,7 +442,7 @@ impl From<TerserEcmaVersion> for EsVersion {
     }
 }
 
-impl From<TerserTopRetainOption> for Vec<JsWord> {
+impl From<TerserTopRetainOption> for Vec<Atom> {
     fn from(v: TerserTopRetainOption) -> Self {
         match v {
             TerserTopRetainOption::Str(s) => s
@@ -456,28 +457,31 @@ impl From<TerserTopRetainOption> for Vec<JsWord> {
 
 fn value_to_expr(v: Value) -> Box<Expr> {
     match v {
-        Value::Null => Box::new(Expr::Lit(Lit::Null(Null { span: DUMMY_SP }))),
-        Value::Bool(value) => Box::new(Expr::Lit(Lit::Bool(Bool {
+        Value::Null => Lit::Null(Null { span: DUMMY_SP }).into(),
+        Value::Bool(value) => Lit::Bool(Bool {
             span: DUMMY_SP,
             value,
-        }))),
+        })
+        .into(),
         Value::Number(v) => {
             trace_op!("Creating a numeric literal from value");
 
-            Box::new(Expr::Lit(Lit::Num(Number {
+            Lit::Num(Number {
                 span: DUMMY_SP,
                 value: v.as_f64().unwrap(),
                 raw: None,
-            })))
+            })
+            .into()
         }
         Value::String(v) => {
-            let value: JsWord = v.into();
+            let value: Atom = v.into();
 
-            Box::new(Expr::Lit(Lit::Str(Str {
+            Lit::Str(Str {
                 span: DUMMY_SP,
                 raw: None,
                 value,
-            })))
+            })
+            .into()
         }
 
         Value::Array(arr) => {
@@ -486,10 +490,11 @@ fn value_to_expr(v: Value) -> Box<Expr> {
                 .map(value_to_expr)
                 .map(|expr| Some(ExprOrSpread { spread: None, expr }))
                 .collect();
-            Box::new(Expr::Array(ArrayLit {
+            ArrayLit {
                 span: DUMMY_SP,
                 elems,
-            }))
+            }
+            .into()
         }
 
         Value::Object(obj) => {
@@ -509,10 +514,11 @@ fn value_to_expr(v: Value) -> Box<Expr> {
                 .map(PropOrSpread::Prop)
                 .collect();
 
-            Box::new(Expr::Object(ObjectLit {
+            ObjectLit {
                 span: DUMMY_SP,
                 props,
-            }))
+            }
+            .into()
         }
     }
 }

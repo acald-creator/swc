@@ -1,10 +1,18 @@
 use serde::{Deserialize, Serialize};
+use swc_common::sync::Lrc;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Config {
+    /// https://www.typescriptlang.org/tsconfig#verbatimModuleSyntax
     #[serde(default)]
     pub verbatim_module_syntax: bool,
 
+    /// Native class properties support
+    #[serde(default)]
+    pub native_class_properties: bool,
+
+    /// https://www.typescriptlang.org/tsconfig/#importsNotUsedAsValues
     #[serde(default)]
     pub import_not_used_as_values: ImportsNotUsedAsValues,
 
@@ -32,17 +40,18 @@ pub struct Config {
 pub struct TsxConfig {
     /// Note: this pass handle jsx directives in comments
     #[serde(default)]
-    pub pragma: Option<String>,
+    pub pragma: Option<Lrc<String>>,
 
     /// Note: this pass handle jsx directives in comments
     #[serde(default)]
-    pub pragma_frag: Option<String>,
+    pub pragma_frag: Option<Lrc<String>>,
 }
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TsImportExportAssignConfig {
-    /// - Rewrite `import foo = require("foo")` to `var foo = require("foo")`
-    /// - Rewrite `export =` to `module.exports = `
+    ///  - Rewrite `import foo = require("foo")` to `var foo = require("foo")`
+    ///  - Rewrite `export =` to `module.exports = `
+    ///
     /// Note: This option is deprecated as all CJS/AMD/UMD can handle it
     /// themselves.
     #[default]
@@ -75,6 +84,3 @@ pub enum ImportsNotUsedAsValues {
     #[serde(rename = "preserve")]
     Preserve,
 }
-
-#[deprecated = "ImportNotUsedAsValues is renamed to ImportsNotUsedAsValues"]
-pub type ImportNotUsedAsValues = ImportsNotUsedAsValues;

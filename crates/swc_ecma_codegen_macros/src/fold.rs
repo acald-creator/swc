@@ -12,23 +12,6 @@ pub(crate) struct InjectSelf {
     pub parser: Option<Ident>,
 }
 
-#[cfg(procmacro2_semver_exempt)]
-fn get_joined_span(t: &dyn ToTokens) -> Span {
-    let tts: TokenStream = t.dump().into();
-    let (mut first, mut last) = (None, None);
-    for tt in tts {
-        match first {
-            None => first = Some(tt.span()),
-            _ => {}
-        }
-
-        last = Some(tt.span());
-    }
-    let cs = Span::call_site();
-    first.unwrap_or(cs).join(last.unwrap_or(cs)).unwrap_or(cs)
-}
-
-#[cfg(not(procmacro2_semver_exempt))]
 fn get_joined_span(t: &dyn ToTokens) -> Span {
     let tts: TokenStream = t.into_token_stream();
     let mut first = None;
@@ -82,7 +65,7 @@ impl Fold for InjectSelf {
         let span = get_joined_span(&i.path);
 
         match &*name {
-            "smallvec" | "vec" | "unreachable" | "tok" | "op" | "js_word" => i,
+            "smallvec" | "vec" | "unreachable" | "tok" | "op" | "atom" => i,
             "println" | "print" | "format" | "assert" | "assert_eq" | "assert_ne"
             | "debug_assert" | "debug_assert_eq" | "debug_assert_ne" | "dbg" => {
                 let mut args: Punctuated<Expr, token::Comma> = parse_args(i.tokens);

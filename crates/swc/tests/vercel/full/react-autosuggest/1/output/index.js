@@ -1,7 +1,4 @@
 "use strict";
-Object.defineProperty(exports, "__esModule", {
-    value: !0
-});
 var _instanceof = require("@swc/helpers/_/_instanceof");
 Object.defineProperty(exports, "__esModule", {
     value: !0
@@ -92,7 +89,7 @@ var ItemsList = function(_Component) {
         }), superClass && _setPrototypeOf(subClass, superClass);
     }(ItemsList, _Component);
     var protoProps, _super = function() {
-        var result, Super = _getPrototypeOf(ItemsList);
+        var self, call, result, Super = _getPrototypeOf(ItemsList);
         return result = !function() {
             if ("undefined" == typeof Reflect || !Reflect.construct || Reflect.construct.sham) return !1;
             if ("function" == typeof Proxy) return !0;
@@ -101,7 +98,7 @@ var ItemsList = function(_Component) {
             } catch (e) {
                 return !1;
             }
-        }() ? Super.apply(this, arguments) : Reflect.construct(Super, arguments, _getPrototypeOf(this).constructor), result && ("object" === _typeof(result) || "function" == typeof result) ? result : _assertThisInitialized(this);
+        }() ? Super.apply(this, arguments) : Reflect.construct(Super, arguments, _getPrototypeOf(this).constructor), self = this, (call = result) && ("object" === _typeof(call) || "function" == typeof call) ? call : _assertThisInitialized(self);
     };
     function ItemsList() {
         var _this;

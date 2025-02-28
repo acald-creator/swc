@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use swc_atoms::js_word;
-use swc_common::{collections::AHashMap, SyntaxContext, DUMMY_SP};
+use rustc_hash::FxHashMap;
+use swc_atoms::atom;
+use swc_common::{SyntaxContext, DUMMY_SP};
 use swc_ecma_ast::*;
 use swc_ecma_transforms_optimization::simplify::{expr_simplifier, ExprSimplifierConfig};
 use swc_ecma_usage_analyzer::marks::Marks;
-use swc_ecma_utils::{undefined, ExprCtx, ExprExt};
+use swc_ecma_utils::{ExprCtx, ExprExt};
 use swc_ecma_visit::VisitMutWith;
 
 use crate::{
@@ -18,7 +19,7 @@ use crate::{
 pub struct Evaluator {
     expr_ctx: ExprCtx,
 
-    module: Module,
+    program: Program,
     marks: Marks,
     data: Eval,
     /// We run minification only once.
@@ -31,9 +32,11 @@ impl Evaluator {
             expr_ctx: ExprCtx {
                 unresolved_ctxt: SyntaxContext::empty().apply_mark(marks.unresolved_mark),
                 is_unresolved_ref_safe: false,
+                in_strict: true,
+                remaining_depth: 3,
             },
 
-            module,
+            program: Program::Module(module),
             marks,
             data: Default::default(),
             done: Default::default(),
@@ -48,7 +51,7 @@ struct Eval {
 
 #[derive(Default)]
 struct EvalStore {
-    cache: AHashMap<Id, Box<Expr>>,
+    cache: FxHashMap<Id, Box<Expr>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,7 +88,7 @@ impl Evaluator {
             let marks = self.marks;
             let data = self.data.clone();
             //
-            self.module.visit_mut_with(&mut compressor(
+            self.program.mutate(&mut compressor(
                 marks,
                 &CompressOptions {
                     // We should not drop unused variables.
@@ -123,7 +126,7 @@ impl Evaluator {
                         obj: tag_obj,
                         prop: MemberProp::Ident(prop),
                         ..
-                    }) if tag_obj.is_global_ref_to(&self.expr_ctx, "String")
+                    }) if tag_obj.is_global_ref_to(self.expr_ctx, "String")
                         && prop.sym == *"raw" =>
                     {
                         return self.eval_tpl(&t.tpl);
@@ -200,11 +203,12 @@ impl Evaluator {
             }) if !prop.is_computed() => {
                 let obj = self.eval_as_expr(obj)?;
 
-                let mut e = Expr::Member(MemberExpr {
+                let mut e: Expr = MemberExpr {
                     span: *span,
                     obj,
                     prop: prop.clone(),
-                });
+                }
+                .into();
 
                 e.visit_mut_with(&mut expr_simplifier(
                     self.marks.unresolved_mark,
@@ -221,26 +225,26 @@ impl Evaluator {
     pub fn eval_tpl(&mut self, q: &Tpl) -> Option<EvalResult> {
         self.run();
 
-        let mut exprs = vec![];
+        let mut exprs = Vec::new();
 
         for expr in &q.exprs {
             let res = self.eval(expr)?;
             exprs.push(match res {
-                EvalResult::Lit(v) => Box::new(Expr::Lit(v)),
-                EvalResult::Undefined => undefined(DUMMY_SP),
+                EvalResult::Lit(v) => v.into(),
+                EvalResult::Undefined => Expr::undefined(DUMMY_SP),
             });
         }
 
-        let mut e = Expr::Tpl(Tpl {
+        let mut e: Box<Expr> = Tpl {
             span: q.span,
             exprs,
             quasis: q.quasis.clone(),
-        });
+        }
+        .into();
 
         {
             e.visit_mut_with(&mut pure_optimizer(
                 &Default::default(),
-                None,
                 self.marks,
                 PureOptimizerConfig {
                     enable_join_vars: false,
@@ -258,7 +262,7 @@ impl Evaluator {
 fn is_truthy(lit: &EvalResult) -> Option<bool> {
     match lit {
         EvalResult::Lit(v) => match v {
-            Lit::Str(v) => Some(v.value != js_word!("")),
+            Lit::Str(v) => Some(v.value != atom!("")),
             Lit::Bool(v) => Some(v.value),
             Lit::Null(_) => Some(false),
             Lit::Num(v) => Some(v.value != 0.0 && v.value != -0.0),

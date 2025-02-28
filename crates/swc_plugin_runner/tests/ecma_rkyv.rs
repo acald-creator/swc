@@ -7,15 +7,13 @@ use std::{
 };
 
 use anyhow::{anyhow, Error};
+use rustc_hash::FxHashMap;
 use serde_json::json;
 #[cfg(feature = "__rkyv")]
 use swc_common::plugin::serialized::PluginSerializedBytes;
-use swc_common::{
-    collections::AHashMap, plugin::metadata::TransformPluginMetadataContext, sync::Lazy, FileName,
-    Mark,
-};
+use swc_common::{plugin::metadata::TransformPluginMetadataContext, sync::Lazy, FileName, Mark};
 use swc_ecma_ast::{EsVersion, Program};
-use swc_ecma_parser::{parse_file_as_program, Syntax, TsConfig};
+use swc_ecma_parser::{parse_file_as_program, Syntax, TsSyntax};
 use testing::CARGO_TARGET_DIR;
 use tracing::info;
 
@@ -82,17 +80,17 @@ fn internal(input: PathBuf) {
     // run single plugin
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         testing::run_test(false, |cm, _handler| {
-            let fm = cm.new_source_file(FileName::Anon, "console.log(foo)".into());
+            let fm = cm.new_source_file(FileName::Anon.into(), "console.log(foo)".into());
 
             let parsed = parse_file_as_program(
                 &fm,
-                Syntax::Typescript(TsConfig {
+                Syntax::Typescript(TsSyntax {
                     tsx: input.to_string_lossy().ends_with(".tsx"),
                     ..Default::default()
                 }),
                 EsVersion::latest(),
                 None,
-                &mut vec![],
+                &mut Vec::new(),
             )
             .unwrap();
 
@@ -100,7 +98,7 @@ fn internal(input: PathBuf) {
                 &swc_common::plugin::serialized::VersionedSerializable::new(parsed.clone()),
             )
             .expect("Should serializable");
-            let experimental_metadata: AHashMap<String, String> = [
+            let experimental_metadata: FxHashMap<String, String> = [
                 (
                     "TestExperimental".to_string(),
                     "ExperimentalValue".to_string(),
@@ -142,14 +140,14 @@ fn internal(input: PathBuf) {
 
         // Run multiple plugins.
         testing::run_test(false, |cm, _handler| {
-            let fm = cm.new_source_file(FileName::Anon, "console.log(foo)".into());
+            let fm = cm.new_source_file(FileName::Anon.into(), "console.log(foo)".into());
 
             let parsed = parse_file_as_program(
                 &fm,
                 Syntax::Es(Default::default()),
                 EsVersion::latest(),
                 None,
-                &mut vec![],
+                &mut Vec::new(),
             )
             .unwrap();
 
@@ -158,7 +156,7 @@ fn internal(input: PathBuf) {
             )
             .expect("Should serializable");
 
-            let experimental_metadata: AHashMap<String, String> = [
+            let experimental_metadata: FxHashMap<String, String> = [
                 (
                     "TestExperimental".to_string(),
                     "ExperimentalValue".to_string(),

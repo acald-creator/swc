@@ -3,23 +3,25 @@
 use std::time::Instant;
 
 use rustc_hash::FxHashSet;
-use swc_common::{util::take::Take, Mark, Span, Spanned, DUMMY_SP};
+use swc_atoms::Atom;
+use swc_common::{util::take::Take, Span, Spanned, DUMMY_SP};
 use swc_ecma_ast::*;
-use swc_ecma_utils::{stack_size::maybe_grow_default, ModuleItemLike, StmtLike, Value};
-use swc_ecma_visit::{noop_visit_type, visit_obj_and_computed, Visit, VisitWith};
+use swc_ecma_transforms_base::{fixer::fixer, hygiene::hygiene};
+use swc_ecma_utils::{stack_size::maybe_grow_default, DropSpan, ModuleItemLike, StmtLike, Value};
+use swc_ecma_visit::{noop_visit_type, visit_mut_pass, visit_obj_and_computed, Visit, VisitWith};
 
 pub(crate) mod base54;
 pub(crate) mod size;
 pub(crate) mod sort;
-pub(crate) mod unit;
 
 pub(crate) fn make_number(span: Span, value: f64) -> Expr {
     trace_op!("Creating a numeric literal");
-    Expr::Lit(Lit::Num(Number {
+    Lit::Num(Number {
         span,
         value,
         raw: None,
-    }))
+    })
+    .into()
 }
 
 pub trait ModuleItemExt:
@@ -31,8 +33,8 @@ pub trait ModuleItemExt:
 
     fn into_module_item(self) -> ModuleItem {
         match self.into_module_decl() {
-            Ok(v) => ModuleItem::ModuleDecl(v),
-            Err(v) => ModuleItem::Stmt(v),
+            Ok(v) => v.into(),
+            Err(v) => v.into(),
         }
     }
 
@@ -79,15 +81,17 @@ impl ModuleItemExt for ModuleItem {
 pub(crate) fn make_bool(span: Span, value: bool) -> Expr {
     trace_op!("Creating a boolean literal");
 
-    Expr::Unary(UnaryExpr {
+    UnaryExpr {
         span,
         op: op!("!"),
-        arg: Box::new(Expr::Lit(Lit::Num(Number {
+        arg: Lit::Num(Number {
             span: DUMMY_SP,
             value: if value { 0.0 } else { 1.0 },
             raw: None,
-        }))),
-    })
+        })
+        .into(),
+    }
+    .into()
 }
 
 /// Additional methods for optimizing expressions.
@@ -127,10 +131,11 @@ pub(crate) trait ExprOptExt: Sized {
             Expr::Seq(seq) => seq,
             _ => {
                 let inner = expr.take();
-                *expr = Expr::Seq(SeqExpr {
+                *expr = SeqExpr {
                     span: DUMMY_SP,
                     exprs: vec![Box::new(inner)],
-                });
+                }
+                .into();
                 expr.force_seq()
             }
         }
@@ -150,10 +155,11 @@ pub(crate) trait ExprOptExt: Sized {
             _ => {
                 let v = to.take();
                 exprs.push(Box::new(v));
-                *to = Expr::Seq(SeqExpr {
+                *to = SeqExpr {
                     span: DUMMY_SP,
                     exprs,
-                });
+                }
+                .into();
             }
         }
     }
@@ -179,16 +185,7 @@ impl ExprOptExt for Expr {
     }
 }
 
-pub(crate) trait SpanExt: Into<Span> {
-    fn with_mark(self, mark: Mark) -> Span {
-        let span = self.into();
-        span.apply_mark(mark)
-    }
-}
-
-impl SpanExt for Span {}
-
-pub(crate) fn contains_leaping_continue_with_label<N>(n: &N, label: Id) -> bool
+pub(crate) fn contains_leaping_continue_with_label<N>(n: &N, label: Atom) -> bool
 where
     N: VisitWith<LeapFinder>,
 {
@@ -215,7 +212,7 @@ pub(crate) struct LeapFinder {
     found_await: bool,
     found_yield: bool,
     found_continue_with_label: bool,
-    target_label: Option<Id>,
+    target_label: Option<Atom>,
 }
 
 impl Visit for LeapFinder {
@@ -240,7 +237,7 @@ impl Visit for LeapFinder {
             self.found_continue_with_label |= self
                 .target_label
                 .as_ref()
-                .map_or(false, |l| *l == label.to_id());
+                .map_or(false, |l| *l == label.sym);
         }
     }
 
@@ -382,12 +379,6 @@ impl Visit for IdentUsageCollector {
         self.ids.insert(n.to_id());
     }
 
-    fn visit_member_prop(&mut self, n: &MemberProp) {
-        if let MemberProp::Computed(..) = n {
-            n.visit_children_with(self);
-        }
-    }
-
     fn visit_prop_name(&mut self, n: &PropName) {
         if let PropName::Computed(..) = n {
             n.visit_children_with(self);
@@ -527,6 +518,30 @@ impl Visit for EvalFinder {
             s.visit_children_with(self);
         }
     }
+}
+
+#[allow(unused)]
+pub(crate) fn dump_program(p: &Program) -> String {
+    #[cfg(feature = "debug")]
+    {
+        force_dump_program(p)
+    }
+    #[cfg(not(feature = "debug"))]
+    {
+        String::new()
+    }
+}
+
+pub(crate) fn force_dump_program(p: &Program) -> String {
+    let _noop_sub = tracing::subscriber::set_default(tracing::subscriber::NoSubscriber::default());
+
+    crate::debug::dump(
+        &p.clone()
+            .apply(fixer(None))
+            .apply(hygiene())
+            .apply(visit_mut_pass(DropSpan {})),
+        true,
+    )
 }
 
 #[cfg(feature = "concurrent")]

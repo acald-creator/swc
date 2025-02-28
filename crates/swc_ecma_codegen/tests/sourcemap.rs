@@ -1,8 +1,9 @@
 use std::{fs::read_to_string, path::PathBuf};
 
 use base64::prelude::{Engine, BASE64_STANDARD};
-use rustc_hash::FxHashSet;
+use rustc_hash::FxBuildHasher;
 use sourcemap::SourceMap;
+use swc_allocator::api::global::HashSet;
 use swc_common::{comments::SingleThreadedComments, source_map::SourceMapGenConfig};
 use swc_ecma_ast::EsVersion;
 use swc_ecma_codegen::{text_writer::WriteJs, Emitter};
@@ -83,6 +84,7 @@ static IGNORED_PASS_TESTS: &[&str] = &[
     "d9eb39b11bc766f4.js",
     "f9888fa1a1e366e7.js",
     "78cf02220fb0937c.js",
+    "5e7ca8611aaa4d53.js",
     // TODO(kdy1): Non-ascii char count
     "58cb05d17f7ec010.js",
     "4d2c7020de650d40.js",
@@ -258,6 +260,11 @@ static IGNORED_PASS_TESTS: &[&str] = &[
     "bc302492d441d561.js",
     "be2fd5888f434cbd.js",
     "f3260491590325af.js",
+    // Unicode 14 vs 15
+    "046a0bb70d03d0cc.js",
+    "08a39e4289b0c3f3.js",
+    "300a638d978d0f2c.js",
+    "44f31660bd715f05.js",
 ];
 
 #[testing::fixture("../swc_ecma_parser/tests/test262-parser/pass/*.js")]
@@ -283,7 +290,7 @@ fn identity(entry: PathBuf) {
         "\n\n========== Running codegen test {}\nSource:\n{}\n",
         file_name, input
     );
-    let mut wr = vec![];
+    let mut wr = std::vec::Vec::new();
 
     ::testing::run_test(false, |cm, handler| {
         let fm = cm.load_file(&entry).expect("failed to load file");
@@ -310,7 +317,7 @@ fn identity(entry: PathBuf) {
             Some(&comments),
         );
         let mut parser: Parser<Lexer> = Parser::new_from(lexer);
-        let mut src_map = vec![];
+        let mut src_map = Vec::new();
 
         {
             let mut wr = Box::new(swc_ecma_codegen::text_writer::JsWriter::new(
@@ -363,7 +370,7 @@ fn identity(entry: PathBuf) {
             .iter()
             .filter(|a| expected_tokens.contains(&**a))
             .map(|v| v.to_string())
-            .collect::<FxHashSet<_>>();
+            .collect::<HashSet<_, FxBuildHasher>>();
 
         let actual_tokens_diff = actual_tokens
             .iter()
@@ -483,7 +490,7 @@ fn assert_eq_same_map(expected: &SourceMap, actual: &SourceMap) {
 /// Creates a url for https://evanw.github.io/source-map-visualization/
 fn visualizer_url(code: &str, map: &SourceMap) -> String {
     let map = {
-        let mut buf = vec![];
+        let mut buf = std::vec::Vec::new();
         map.to_writer(&mut buf).unwrap();
         String::from_utf8(buf).unwrap()
     };

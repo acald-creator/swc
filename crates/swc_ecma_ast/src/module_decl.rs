@@ -1,4 +1,5 @@
 use is_macro::Is;
+use swc_atoms::Atom;
 use swc_common::{ast_node, util::take::Take, EqIgnoreSpan, Span, DUMMY_SP};
 
 use crate::{
@@ -7,12 +8,13 @@ use crate::{
     ident::Ident,
     lit::Str,
     typescript::{TsExportAssignment, TsImportEqualsDecl, TsInterfaceDecl, TsNamespaceExportDecl},
-    ObjectLit,
+    BindingIdent, IdentName, ObjectLit,
 };
 
 #[ast_node]
 #[derive(Eq, Hash, Is, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub enum ModuleDecl {
     #[tag("ImportDeclaration")]
     Import(ImportDecl),
@@ -42,15 +44,57 @@ pub enum ModuleDecl {
     TsNamespaceExport(TsNamespaceExportDecl),
 }
 
+boxed!(ModuleDecl, [TsImportEqualsDecl]);
+
+macro_rules! module_decl {
+    ([$($variant:ty),*]) => {
+        $(
+            bridge_from!(crate::ModuleItem, crate::ModuleDecl, $variant);
+        )*
+    };
+}
+
+module_decl!([
+    ImportDecl,
+    ExportDecl,
+    NamedExport,
+    ExportDefaultDecl,
+    ExportDefaultExpr,
+    ExportAll,
+    TsImportEqualsDecl,
+    TsExportAssignment,
+    TsNamespaceExportDecl
+]);
+
 impl Take for ModuleDecl {
     fn dummy() -> Self {
-        ModuleDecl::Import(ImportDecl::dummy())
+        ImportDecl::dummy().into()
     }
 }
 
+/// Default exports other than **direct** function expression or class
+/// expression.
+///
+///
+/// # Note
+///
+/// ```ts
+/// export default function Foo() {
+/// }
+/// ```
+///
+/// is [`ExportDefaultDecl`] and it's hoisted.
+///
+/// ```ts
+/// export default (function Foo() {
+/// })
+/// ```
+///
+/// is [`ExportDefaultExpr`] and it's not hoisted.
 #[ast_node("ExportDefaultExpression")]
 #[derive(Eq, Hash, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct ExportDefaultExpr {
     pub span: Span,
 
@@ -61,6 +105,7 @@ pub struct ExportDefaultExpr {
 #[ast_node("ExportDeclaration")]
 #[derive(Eq, Hash, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct ExportDecl {
     pub span: Span,
 
@@ -71,6 +116,7 @@ pub struct ExportDecl {
 #[ast_node("ImportDeclaration")]
 #[derive(Eq, Hash, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct ImportDecl {
     pub span: Span,
 
@@ -92,12 +138,13 @@ pub struct ImportDecl {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Default, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 #[cfg_attr(
     any(feature = "rkyv-impl"),
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-#[cfg_attr(feature = "rkyv-impl", archive(check_bytes))]
-#[cfg_attr(feature = "rkyv-impl", archive_attr(repr(u32)))]
+#[cfg_attr(feature = "rkyv-impl", derive(bytecheck::CheckBytes))]
+#[cfg_attr(feature = "rkyv-impl", repr(u32))]
 #[cfg_attr(feature = "serde-impl", derive(serde::Serialize, serde::Deserialize))]
 pub enum ImportPhase {
     #[default]
@@ -126,6 +173,7 @@ impl Take for ImportDecl {
 #[ast_node("ExportAllDeclaration")]
 #[derive(Eq, Hash, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct ExportAll {
     pub span: Span,
 
@@ -155,6 +203,7 @@ impl Take for ExportAll {
 #[ast_node("ExportNamedDeclaration")]
 #[derive(Eq, Hash, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct NamedExport {
     pub span: Span,
 
@@ -185,6 +234,7 @@ impl Take for NamedExport {
 #[ast_node("ExportDefaultDeclaration")]
 #[derive(Eq, Hash, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct ExportDefaultDecl {
     pub span: Span,
 
@@ -194,6 +244,7 @@ pub struct ExportDefaultDecl {
 #[ast_node]
 #[derive(Eq, Hash, Is, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub enum DefaultDecl {
     #[tag("ClassExpression")]
     Class(ClassExpr),
@@ -209,6 +260,7 @@ pub enum DefaultDecl {
 #[ast_node]
 #[derive(Eq, Hash, Is, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub enum ImportSpecifier {
     #[tag("ImportSpecifier")]
     Named(ImportNamedSpecifier),
@@ -218,10 +270,36 @@ pub enum ImportSpecifier {
     Namespace(ImportStarAsSpecifier),
 }
 
+impl ImportSpecifier {
+    pub fn is_type_only(&self) -> bool {
+        match self {
+            ImportSpecifier::Named(named) => named.is_type_only,
+            ImportSpecifier::Default(..) | ImportSpecifier::Namespace(..) => false,
+        }
+    }
+
+    pub fn local(&self) -> &Ident {
+        match self {
+            ImportSpecifier::Named(named) => &named.local,
+            ImportSpecifier::Default(default) => &default.local,
+            ImportSpecifier::Namespace(ns) => &ns.local,
+        }
+    }
+
+    pub fn local_mut(&mut self) -> &mut Ident {
+        match self {
+            ImportSpecifier::Named(named) => &mut named.local,
+            ImportSpecifier::Default(default) => &mut default.local,
+            ImportSpecifier::Namespace(ns) => &mut ns.local,
+        }
+    }
+}
+
 /// e.g. `import foo from 'mod.js'`
 #[ast_node("ImportDefaultSpecifier")]
 #[derive(Eq, Hash, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct ImportDefaultSpecifier {
     pub span: Span,
 
@@ -231,6 +309,7 @@ pub struct ImportDefaultSpecifier {
 #[ast_node("ImportNamespaceSpecifier")]
 #[derive(Eq, Hash, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct ImportStarAsSpecifier {
     pub span: Span,
 
@@ -242,6 +321,7 @@ pub struct ImportStarAsSpecifier {
 #[ast_node("ImportSpecifier")]
 #[derive(Eq, Hash, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct ImportNamedSpecifier {
     pub span: Span,
 
@@ -257,6 +337,7 @@ pub struct ImportNamedSpecifier {
 #[ast_node]
 #[derive(Eq, Hash, Is, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub enum ExportSpecifier {
     #[tag("ExportNamespaceSpecifier")]
     Namespace(ExportNamespaceSpecifier),
@@ -272,6 +353,7 @@ pub enum ExportSpecifier {
 #[ast_node("ExportNamespaceSpecifier")]
 #[derive(Eq, Hash, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct ExportNamespaceSpecifier {
     pub span: Span,
 
@@ -282,6 +364,7 @@ pub struct ExportNamespaceSpecifier {
 #[ast_node("ExportDefaultSpecifier")]
 #[derive(Eq, Hash, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct ExportDefaultSpecifier {
     #[span]
     pub exported: Ident,
@@ -290,6 +373,7 @@ pub struct ExportDefaultSpecifier {
 #[ast_node("ExportSpecifier")]
 #[derive(Eq, Hash, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 pub struct ExportNamedSpecifier {
     pub span: Span,
     /// `foo` in `export { foo as bar }`
@@ -305,6 +389,7 @@ pub struct ExportNamedSpecifier {
 #[ast_node]
 #[derive(Eq, Hash, EqIgnoreSpan)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "shrink-to-fit", derive(shrink_to_fit::ShrinkToFit))]
 // https://tc39.es/ecma262/#prod-ModuleExportName
 pub enum ModuleExportName {
     #[tag("Identifier")]
@@ -312,4 +397,17 @@ pub enum ModuleExportName {
 
     #[tag("StringLiteral")]
     Str(Str),
+}
+
+bridge_from!(ModuleExportName, Ident, BindingIdent);
+bridge_from!(ModuleExportName, Ident, IdentName);
+
+impl ModuleExportName {
+    /// Get the atom of the export name.
+    pub fn atom(&self) -> &Atom {
+        match self {
+            ModuleExportName::Ident(i) => &i.sym,
+            ModuleExportName::Str(s) => &s.value,
+        }
+    }
 }

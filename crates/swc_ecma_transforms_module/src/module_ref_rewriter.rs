@@ -1,8 +1,6 @@
-use swc_atoms::JsWord;
-use swc_common::{
-    collections::{AHashMap, AHashSet},
-    SyntaxContext, DUMMY_SP,
-};
+use rustc_hash::{FxHashMap, FxHashSet};
+use swc_atoms::Atom;
+use swc_common::SyntaxContext;
 use swc_ecma_ast::*;
 use swc_ecma_transforms_base::helpers::HELPERS;
 use swc_ecma_utils::{ExprFactory, QueryRef, RefRewriter};
@@ -10,7 +8,7 @@ use swc_ecma_visit::VisitMutWith;
 
 use crate::util::prop_name;
 
-pub type ImportMap = AHashMap<Id, (Ident, Option<JsWord>)>;
+pub type ImportMap = FxHashMap<Id, (Ident, Option<Atom>)>;
 
 pub(crate) struct ImportQuery {
     /// ```javascript
@@ -32,7 +30,7 @@ pub(crate) struct ImportQuery {
     /// )
     /// ```
     import_map: ImportMap,
-    lazy_record: AHashSet<Id>,
+    lazy_record: FxHashSet<Id>,
     helper_ctxt: Option<SyntaxContext>,
 }
 
@@ -42,7 +40,7 @@ impl QueryRef for ImportQuery {
             .get(&ident.to_id())
             .map(|(mod_ident, mod_prop)| -> Box<Expr> {
                 let mut mod_ident = mod_ident.clone();
-                let span = ident.span.with_ctxt(mod_ident.span.ctxt);
+                let span = ident.span;
                 mod_ident.span = span;
 
                 let mod_expr = if self.lazy_record.contains(&mod_ident.to_id()) {
@@ -52,7 +50,7 @@ impl QueryRef for ImportQuery {
                 };
 
                 if let Some(imported_name) = mod_prop {
-                    let prop = prop_name(imported_name, DUMMY_SP).into();
+                    let prop = prop_name(imported_name, Default::default()).into();
 
                     MemberExpr {
                         obj: Box::new(mod_expr),
@@ -77,7 +75,7 @@ impl QueryRef for ImportQuery {
     }
 
     fn should_fix_this(&self, ident: &Ident) -> bool {
-        if self.helper_ctxt.iter().any(|ctxt| ctxt == &ident.span.ctxt) {
+        if self.helper_ctxt.iter().any(|ctxt| ctxt == &ident.ctxt) {
             return false;
         }
 
@@ -91,7 +89,7 @@ impl QueryRef for ImportQuery {
 pub(crate) fn rewrite_import_bindings<V>(
     node: &mut V,
     import_map: ImportMap,
-    lazy_record: AHashSet<Id>,
+    lazy_record: FxHashSet<Id>,
 ) where
     V: VisitMutWith<RefRewriter<ImportQuery>>,
 {

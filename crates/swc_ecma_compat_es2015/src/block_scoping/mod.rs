@@ -1,23 +1,18 @@
 use std::{iter::once, mem::take};
 
 use indexmap::IndexMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use swc_atoms::JsWord;
-use swc_common::{
-    chain,
-    collections::{AHashMap, AHashSet},
-    util::take::Take,
-    Mark, Spanned, SyntaxContext, DUMMY_SP,
-};
+use swc_atoms::Atom;
+use swc_common::{util::take::Take, Mark, Spanned, SyntaxContext, DUMMY_SP};
 use swc_ecma_ast::*;
 use swc_ecma_transforms_base::helper;
 use swc_ecma_utils::{
     find_pat_ids, function::FnEnvHoister, prepend_stmt, private_ident, quote_ident, quote_str,
-    undefined, ExprFactory, StmtLike,
+    ExprFactory, StmtLike,
 };
 use swc_ecma_visit::{
-    as_folder, noop_visit_mut_type, noop_visit_type, visit_mut_obj_and_computed, Fold, Visit,
-    VisitMut, VisitMutWith, VisitWith,
+    noop_visit_mut_type, visit_mut_obj_and_computed, visit_mut_pass, VisitMut, VisitMutWith,
 };
 use swc_trace_macro::swc_trace;
 
@@ -36,16 +31,16 @@ mod vars;
 ///    });
 /// }
 /// ```
-pub fn block_scoping(unresolved_mark: Mark) -> impl VisitMut + Fold {
-    as_folder(chain!(
-        self::vars::block_scoped_vars(),
-        BlockScoping {
+pub fn block_scoping(unresolved_mark: Mark) -> impl Pass {
+    (
+        visit_mut_pass(self::vars::block_scoped_vars()),
+        visit_mut_pass(BlockScoping {
             unresolved_mark,
             scope: Default::default(),
-            vars: vec![],
+            vars: Vec::new(),
             var_decl_kind: VarDeclKind::Var,
-        }
-    ))
+        }),
+    )
 }
 
 type ScopeStack = SmallVec<[ScopeKind; 8]>;
@@ -58,7 +53,7 @@ enum ScopeKind {
         /// Produced by identifier reference and consumed by for-of/in loop.
         used: Vec<Id>,
         /// Map of original identifier to modified syntax context
-        mutated: AHashMap<Id, SyntaxContext>,
+        mutated: FxHashMap<Id, SyntaxContext>,
     },
     Fn,
     Block,
@@ -100,17 +95,19 @@ impl BlockScoping {
     }
 
     fn mark_as_used(&mut self, i: Id) {
-        for (idx, scope) in self.scope.iter_mut().rev().enumerate() {
+        // Only consider the variable used in a non-ScopeKind::Loop, which means it is
+        // captured in a closure
+        for scope in self
+            .scope
+            .iter_mut()
+            .rev()
+            .skip_while(|scope| matches!(scope, ScopeKind::Loop { .. }))
+        {
             if let ScopeKind::Loop {
                 lexical_var, used, ..
             } = scope
             {
-                //
                 if lexical_var.contains(&i) {
-                    if idx == 0 {
-                        return;
-                    }
-
                     used.push(i);
                     return;
                 }
@@ -128,16 +125,6 @@ impl BlockScoping {
     fn handle_capture_of_vars(&mut self, body: &mut Box<Stmt>) {
         let body_stmt = &mut **body;
 
-        {
-            let mut v = FunctionFinder { found: false };
-            body_stmt.visit_with(&mut v);
-            if !v.found {
-                self.scope.pop();
-                return;
-            }
-        }
-
-        //
         if let Some(ScopeKind::Loop {
             args,
             used,
@@ -152,7 +139,7 @@ impl BlockScoping {
             let mut env_hoister =
                 FnEnvHoister::new(SyntaxContext::empty().apply_mark(self.unresolved_mark));
             body_stmt.visit_mut_with(&mut env_hoister);
-            let mut inits: Vec<Box<Expr>> = vec![];
+            let mut inits: Vec<Box<Expr>> = Vec::new();
 
             for mut var in env_hoister.to_decl() {
                 if let Some(init) = var.init.take() {
@@ -177,7 +164,7 @@ impl BlockScoping {
                 has_yield: false,
                 has_await: false,
                 label: IndexMap::new(),
-                inner_label: AHashSet::default(),
+                inner_label: FxHashSet::default(),
                 mutated,
                 in_switch_case: false,
                 in_nested_loop: false,
@@ -190,6 +177,7 @@ impl BlockScoping {
                 body => BlockStmt {
                     span: DUMMY_SP,
                     stmts: vec![body.take()],
+                    ..Default::default()
                 },
             };
 
@@ -230,7 +218,7 @@ impl BlockScoping {
                                 Param {
                                     span: DUMMY_SP,
                                     decorators: Default::default(),
-                                    pat: Ident::new(i.0.clone(), DUMMY_SP.with_ctxt(ctxt)).into(),
+                                    pat: Ident::new(i.0.clone(), DUMMY_SP, ctxt).into(),
                                 }
                             })
                             .collect(),
@@ -238,8 +226,7 @@ impl BlockScoping {
                         body: Some(body_stmt),
                         is_generator: flow_helper.has_yield,
                         is_async: flow_helper.has_await,
-                        type_params: None,
-                        return_type: None,
+                        ..Default::default()
                     }
                     .into(),
                 ),
@@ -252,9 +239,9 @@ impl BlockScoping {
                 args: args
                     .iter()
                     .cloned()
-                    .map(|i| Ident::new(i.0, DUMMY_SP.with_ctxt(i.1)).as_arg())
+                    .map(|i| Ident::new(i.0, DUMMY_SP, i.1).as_arg())
                     .collect(),
-                type_args: None,
+                ..Default::default()
             }
             .into();
 
@@ -276,10 +263,11 @@ impl BlockScoping {
             }
 
             if !inits.is_empty() {
-                call = Expr::Seq(SeqExpr {
+                call = SeqExpr {
                     span: DUMMY_SP,
                     exprs: inits.into_iter().chain(once(Box::new(call))).collect(),
-                })
+                }
+                .into()
             }
 
             if flow_helper.has_return || flow_helper.has_break || !flow_helper.label.is_empty() {
@@ -290,13 +278,13 @@ impl BlockScoping {
                     VarDecl {
                         span: DUMMY_SP,
                         kind: VarDeclKind::Var,
-                        declare: false,
                         decls: vec![VarDeclarator {
                             span: DUMMY_SP,
                             name: ret.clone().into(),
                             init: Some(Box::new(call.take())),
                             definite: false,
                         }],
+                        ..Default::default()
                     }
                     .into(),
                 ];
@@ -306,7 +294,7 @@ impl BlockScoping {
                     stmts.push(
                         IfStmt {
                             span: DUMMY_SP,
-                            test: Box::new(Expr::Bin(BinExpr {
+                            test: BinExpr {
                                 span: DUMMY_SP,
                                 op: op!("==="),
                                 left: {
@@ -317,17 +305,21 @@ impl BlockScoping {
                                         span: Default::default(),
                                         callee,
                                         args: vec![ret.clone().as_arg()],
-                                        type_args: None,
+                                        ..Default::default()
                                     }
                                     .into()
                                 },
                                 //"object"
                                 right: "object".into(),
-                            })),
-                            cons: Box::new(Stmt::Return(ReturnStmt {
-                                span: DUMMY_SP,
-                                arg: Some(ret.clone().make_member(quote_ident!("v")).into()),
-                            })),
+                            }
+                            .into(),
+                            cons: Box::new(
+                                ReturnStmt {
+                                    span: DUMMY_SP,
+                                    arg: Some(ret.clone().make_member(quote_ident!("v")).into()),
+                                }
+                                .into(),
+                            ),
                             alt: None,
                         }
                         .into(),
@@ -339,10 +331,10 @@ impl BlockScoping {
                         IfStmt {
                             span: DUMMY_SP,
                             test: ret.clone().make_eq(quote_str!("break")).into(),
-                            cons: Stmt::Break(BreakStmt {
+                            cons: BreakStmt {
                                 span: DUMMY_SP,
                                 label: None,
-                            })
+                            }
                             .into(),
                             alt: None,
                         }
@@ -383,6 +375,7 @@ impl BlockScoping {
                     BlockStmt {
                         span: DUMMY_SP,
                         stmts,
+                        ..Default::default()
                     }
                     .into(),
                 );
@@ -410,10 +403,14 @@ impl BlockScoping {
     /// which fixes https://github.com/swc-project/swc/issues/6573
     fn blockify_for_stmt_body(&self, body: &mut Box<Stmt>) -> bool {
         if !body.is_block() {
-            *body = Box::new(Stmt::Block(BlockStmt {
-                span: Default::default(),
-                stmts: vec![*body.take()],
-            }));
+            *body = Box::new(
+                BlockStmt {
+                    span: Default::default(),
+                    stmts: vec![*body.take()],
+                    ..Default::default()
+                }
+                .into(),
+            );
             true
         } else {
             false
@@ -434,7 +431,7 @@ impl BlockScoping {
 
 #[swc_trace]
 impl VisitMut for BlockScoping {
-    noop_visit_mut_type!();
+    noop_visit_mut_type!(fail);
 
     fn visit_mut_arrow_expr(&mut self, n: &mut ArrowExpr) {
         n.params.visit_mut_with(self);
@@ -444,7 +441,7 @@ impl VisitMut for BlockScoping {
     fn visit_mut_block_stmt(&mut self, n: &mut BlockStmt) {
         let vars = take(&mut self.vars);
         n.visit_mut_children_with(self);
-        debug_assert_eq!(self.vars, vec![]);
+        debug_assert_eq!(self.vars, Vec::new());
         self.vars = vars;
     }
 
@@ -477,7 +474,7 @@ impl VisitMut for BlockScoping {
         let kind = ScopeKind::Loop {
             lexical_var,
             args,
-            used: vec![],
+            used: Vec::new(),
             mutated: Default::default(),
         };
 
@@ -503,7 +500,7 @@ impl VisitMut for BlockScoping {
         let kind = ScopeKind::Loop {
             lexical_var: vars,
             args,
-            used: vec![],
+            used: Vec::new(),
             mutated: Default::default(),
         };
 
@@ -529,7 +526,7 @@ impl VisitMut for BlockScoping {
         let kind = ScopeKind::Loop {
             lexical_var,
             args,
-            used: vec![],
+            used: Vec::new(),
             mutated: Default::default(),
         };
         self.visit_mut_with_scope(kind, &mut node.body);
@@ -596,7 +593,7 @@ impl VisitMut for BlockScoping {
             if self.var_decl_kind == VarDeclKind::Var {
                 var.init = None
             } else {
-                var.init = Some(undefined(var.span()))
+                var.init = Some(Expr::undefined(var.span()))
             }
         }
     }
@@ -620,12 +617,13 @@ impl BlockScoping {
         if !self.vars.is_empty() {
             prepend_stmt(
                 stmts,
-                T::from_stmt(
+                T::from(
                     VarDecl {
                         span: DUMMY_SP,
                         kind: VarDeclKind::Var,
                         declare: false,
                         decls: take(&mut self.vars),
+                        ..Default::default()
                     }
                     .into(),
                 ),
@@ -648,11 +646,11 @@ struct FlowHelper<'a> {
     has_yield: bool,
     has_await: bool,
 
-    // label cannot be shadowed, so it's pretty safe to use JsWord
-    label: IndexMap<JsWord, Label>,
-    inner_label: AHashSet<JsWord>,
+    // label cannot be shadowed, so it's pretty safe to use Atom
+    label: IndexMap<Atom, Label>,
+    inner_label: FxHashSet<Atom>,
     all: &'a Vec<Id>,
-    mutated: AHashMap<Id, SyntaxContext>,
+    mutated: FxHashMap<Id, SyntaxContext>,
     in_switch_case: bool,
 
     in_nested_loop: bool,
@@ -663,7 +661,7 @@ enum Label {
     Continue(Ident),
 }
 
-impl<'a> FlowHelper<'a> {
+impl FlowHelper<'_> {
     fn check(&mut self, i: Id) {
         if self.all.contains(&i) {
             self.mutated.insert(
@@ -683,7 +681,7 @@ impl<'a> FlowHelper<'a> {
 
 #[swc_trace]
 impl VisitMut for FlowHelper<'_> {
-    noop_visit_mut_type!();
+    noop_visit_mut_type!(fail);
 
     /// noop
     fn visit_mut_arrow_expr(&mut self, _n: &mut ArrowExpr) {}
@@ -748,6 +746,12 @@ impl VisitMut for FlowHelper<'_> {
     /// noop
     fn visit_mut_function(&mut self, _f: &mut Function) {}
 
+    /// noop
+    fn visit_mut_getter_prop(&mut self, _f: &mut GetterProp) {}
+
+    /// noop
+    fn visit_mut_setter_prop(&mut self, _f: &mut SetterProp) {}
+
     fn visit_mut_labeled_stmt(&mut self, l: &mut LabeledStmt) {
         self.inner_label.insert(l.label.sym.clone());
 
@@ -763,7 +767,7 @@ impl VisitMut for FlowHelper<'_> {
                     return;
                 }
                 let value = if let Some(label) = label {
-                    let value: JsWord = format!("continue|{}", label.sym).into();
+                    let value: Atom = format!("continue|{}", label.sym).into();
                     self.label
                         .insert(value.clone(), Label::Continue(label.clone()));
                     value
@@ -771,7 +775,7 @@ impl VisitMut for FlowHelper<'_> {
                     "continue".into()
                 };
 
-                *node = Stmt::Return(ReturnStmt {
+                *node = ReturnStmt {
                     span,
                     arg: Some(
                         Lit::Str(Str {
@@ -781,14 +785,15 @@ impl VisitMut for FlowHelper<'_> {
                         })
                         .into(),
                     ),
-                });
+                }
+                .into();
             }
             Stmt::Break(BreakStmt { label, .. }) => {
                 if (self.in_switch_case || self.in_nested_loop) && !self.has_outer_label(label) {
                     return;
                 }
                 let value = if let Some(label) = label {
-                    let value: JsWord = format!("break|{}", label.sym).into();
+                    let value: Atom = format!("break|{}", label.sym).into();
                     self.label
                         .insert(value.clone(), Label::Break(label.clone()));
                     value
@@ -796,35 +801,45 @@ impl VisitMut for FlowHelper<'_> {
                     self.has_break = true;
                     "break".into()
                 };
-                *node = Stmt::Return(ReturnStmt {
+                *node = ReturnStmt {
                     span,
-                    arg: Some(Box::new(Expr::Lit(Lit::Str(Str {
-                        span,
-                        value,
-                        raw: None,
-                    })))),
-                });
+                    arg: Some(
+                        Lit::Str(Str {
+                            span,
+                            value,
+                            raw: None,
+                        })
+                        .into(),
+                    ),
+                }
+                .into();
             }
             Stmt::Return(s) => {
                 self.has_return = true;
                 s.visit_mut_with(self);
 
-                *node = Stmt::Return(ReturnStmt {
+                *node = ReturnStmt {
                     span,
-                    arg: Some(Box::new(Expr::Object(ObjectLit {
-                        span,
-                        props: vec![PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
-                            key: PropName::Ident(Ident::new("v".into(), DUMMY_SP)),
-                            value: s.arg.take().unwrap_or_else(|| {
-                                Box::new(Expr::Unary(UnaryExpr {
-                                    span: DUMMY_SP,
-                                    op: op!("void"),
-                                    arg: undefined(DUMMY_SP),
-                                }))
-                            }),
-                        })))],
-                    }))),
-                });
+                    arg: Some(
+                        ObjectLit {
+                            span,
+                            props: vec![PropOrSpread::Prop(Box::new(Prop::KeyValue(
+                                KeyValueProp {
+                                    key: PropName::Ident(IdentName::new("v".into(), DUMMY_SP)),
+                                    value: s.arg.take().unwrap_or_else(|| {
+                                        Box::new(Expr::Unary(UnaryExpr {
+                                            span: DUMMY_SP,
+                                            op: op!("void"),
+                                            arg: Expr::undefined(DUMMY_SP),
+                                        }))
+                                    }),
+                                },
+                            )))],
+                        }
+                        .into(),
+                    ),
+                }
+                .into();
             }
             _ => node.visit_mut_children_with(self),
         }
@@ -862,41 +877,42 @@ impl VisitMut for FlowHelper<'_> {
 }
 
 struct MutationHandler<'a> {
-    map: &'a mut AHashMap<Id, SyntaxContext>,
+    map: &'a mut FxHashMap<Id, SyntaxContext>,
     in_function: bool,
 }
 
 impl MutationHandler<'_> {
     fn make_reassignment(&self, orig: Option<Box<Expr>>) -> Expr {
         if self.map.is_empty() {
-            return *orig.unwrap_or_else(|| undefined(DUMMY_SP));
+            return *orig.unwrap_or_else(|| Expr::undefined(DUMMY_SP));
         }
 
         let mut exprs = Vec::with_capacity(self.map.len() + 1);
 
         for (id, ctxt) in &*self.map {
-            exprs.push(Box::new(Expr::Assign(AssignExpr {
-                span: DUMMY_SP,
-                left: Ident::new(id.0.clone(), DUMMY_SP.with_ctxt(id.1)).into(),
-                op: op!("="),
-                right: Box::new(Expr::Ident(Ident::new(
-                    id.0.clone(),
-                    DUMMY_SP.with_ctxt(*ctxt),
-                ))),
-            })));
+            exprs.push(
+                AssignExpr {
+                    span: DUMMY_SP,
+                    left: Ident::new(id.0.clone(), DUMMY_SP, id.1).into(),
+                    op: op!("="),
+                    right: Box::new(Ident::new(id.0.clone(), DUMMY_SP, *ctxt).into()),
+                }
+                .into(),
+            );
         }
-        exprs.push(orig.unwrap_or_else(|| undefined(DUMMY_SP)));
+        exprs.push(orig.unwrap_or_else(|| Expr::undefined(DUMMY_SP)));
 
-        Expr::Seq(SeqExpr {
+        SeqExpr {
             span: DUMMY_SP,
             exprs,
-        })
+        }
+        .into()
     }
 }
 
 #[swc_trace]
 impl VisitMut for MutationHandler<'_> {
-    noop_visit_mut_type!();
+    noop_visit_mut_type!(fail);
 
     visit_mut_obj_and_computed!();
 
@@ -920,7 +936,7 @@ impl VisitMut for MutationHandler<'_> {
 
     fn visit_mut_ident(&mut self, n: &mut Ident) {
         if let Some(&ctxt) = self.map.get(&n.to_id()) {
-            n.span = n.span.with_ctxt(ctxt)
+            n.ctxt = ctxt;
         }
     }
 
@@ -934,46 +950,4 @@ impl VisitMut for MutationHandler<'_> {
 
         n.arg = Some(Box::new(self.make_reassignment(val)))
     }
-}
-
-#[derive(Debug)]
-struct FunctionFinder {
-    found: bool,
-}
-
-impl Visit for FunctionFinder {
-    noop_visit_type!();
-
-    fn visit_arrow_expr(&mut self, _: &ArrowExpr) {
-        self.found = true;
-    }
-
-    /// Do not recurse into nested loop.
-    ///
-    /// https://github.com/swc-project/swc/issues/2622
-    fn visit_do_while_stmt(&mut self, _: &DoWhileStmt) {}
-
-    /// Do not recurse into nested loop.
-    ///
-    /// https://github.com/swc-project/swc/issues/2622
-    fn visit_for_in_stmt(&mut self, _: &ForInStmt) {}
-
-    /// Do not recurse into nested loop.
-    ///
-    /// https://github.com/swc-project/swc/issues/2622
-    fn visit_for_of_stmt(&mut self, _: &ForOfStmt) {}
-
-    /// Do not recurse into nested loop.
-    ///
-    /// https://github.com/swc-project/swc/issues/2622
-    fn visit_for_stmt(&mut self, _: &ForStmt) {}
-
-    fn visit_function(&mut self, _: &Function) {
-        self.found = true
-    }
-
-    /// Do not recurse into nested loop.
-    ///
-    /// https://github.com/swc-project/swc/issues/2622
-    fn visit_while_stmt(&mut self, _: &WhileStmt) {}
 }
